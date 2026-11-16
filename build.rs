@@ -9,7 +9,6 @@ fn main() {
 	compile_windows_resources();
 }
 
-
 #[cfg(windows)]
 fn compile_windows_resources() {
 	let mut resources = winresource::WindowsResource::new();

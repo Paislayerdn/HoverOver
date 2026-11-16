@@ -53,9 +53,23 @@ pub(super) fn draw_image(canvas: &mut Canvas, object: &ImageObject) {
 				as u32;
 			let source_offset = ((source_y * object.image.width + source_x) * 4) as usize;
 			let pixel = &object.image.rgba_pixels[source_offset..source_offset + 4];
-			canvas.blend_pixel(x as i32, y as i32, [pixel[0], pixel[1], pixel[2], pixel[3]]);
+			canvas.blend_pixel(
+				x as i32,
+				y as i32,
+				[
+					pixel[0],
+					pixel[1],
+					pixel[2],
+					alpha_after_opacity(pixel[3], object.placement.opacity_percent),
+				],
+			);
 		}
 	}
+}
+
+fn alpha_after_opacity(source_alpha: u8, opacity_percent: u8) -> u8 {
+	let opacity_percent = u16::from(opacity_percent.min(100));
+	((u16::from(source_alpha) * opacity_percent + 50) / 100) as u8
 }
 
 pub(super) fn draw_selection(canvas: &mut Canvas, object: &ImageObject) {
@@ -78,4 +92,18 @@ pub(super) fn draw_selection(canvas: &mut Canvas, object: &ImageObject) {
 		[255, 255, 255, 255],
 		outline,
 	);
+}
+
+#[cfg(test)]
+mod tests {
+	use super::alpha_after_opacity;
+
+	#[test]
+	fn image_alpha_scales_with_opacity_and_rounds() {
+		assert_eq!(alpha_after_opacity(255, 0), 0);
+		assert_eq!(alpha_after_opacity(255, 100), 255);
+		assert_eq!(alpha_after_opacity(128, 50), 64);
+		assert_eq!(alpha_after_opacity(255, 50), 128);
+		assert_eq!(alpha_after_opacity(255, 150), 255);
+	}
 }

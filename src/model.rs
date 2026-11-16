@@ -57,7 +57,23 @@ fn default_opacity_percent() -> u8 {
 	100
 }
 
+pub(crate) fn clamp_opacity_percent(value: i32) -> u8 {
+	value.clamp(0, 100) as u8
+}
+
 pub(crate) struct ImageObject {
 	pub(crate) placement: ImagePlacement,
 	pub(crate) image: ImageData,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::clamp_opacity_percent;
+
+	#[test]
+	fn opacity_values_are_clamped_to_the_supported_range() {
+		assert_eq!(clamp_opacity_percent(-20), 0);
+		assert_eq!(clamp_opacity_percent(45), 45);
+		assert_eq!(clamp_opacity_percent(150), 100);
+	}
 }

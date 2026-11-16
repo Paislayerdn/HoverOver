@@ -18,8 +18,6 @@ pub(crate) const TOOLBAR_BOTTOM_GAP: i32 = 28;
 pub(crate) const QUIT_BUTTON_SIZE: i32 = 40;
 pub(crate) const QUIT_BUTTON_RIGHT_GAP: i32 = 28;
 pub(crate) const QUIT_BUTTON_BOTTOM_GAP: i32 = 28;
-const DOT_RADIUS: i32 = 5;
-const DOT_SPACING: i32 = 16;
 
 pub(crate) fn toolbar_bounds(width: u32, height: u32) -> DirtyRect {
 	let left = (width as i32 - TOOLBAR_WIDTH) / 2;
@@ -82,8 +80,8 @@ impl Canvas<'_> {
 		pixel_primitives::draw_handle(self, center_x, center_y, size, fill_color, border_color);
 	}
 
-	fn draw_dot_pattern(&mut self) {
-		editor_chrome::draw_dot_pattern(self);
+	fn draw_dot_pattern(&mut self, cursor_position: Option<(f32, f32)>) {
+		editor_chrome::draw_dot_pattern(self, cursor_position);
 	}
 
 	fn draw_image(&mut self, object: &ImageObject) {
@@ -101,6 +99,10 @@ impl Canvas<'_> {
 	fn draw_quit_button(&mut self) {
 		editor_chrome::draw_quit_button(self);
 	}
+
+	fn draw_mode_label(&mut self) {
+		editor_chrome::draw_mode_label(self);
+	}
 }
 
 pub(crate) fn render(
@@ -109,6 +111,7 @@ pub(crate) fn render(
 	mode: Mode,
 	images: &[ImageObject],
 	selected_image: Option<usize>,
+	cursor_position: Option<(f32, f32)>,
 ) -> ImageData {
 	let pixels = vec![0; (screen_width * screen_height * 4) as usize];
 	let mut frame = ImageData {
@@ -121,6 +124,7 @@ pub(crate) fn render(
 		mode,
 		images,
 		selected_image,
+		cursor_position,
 		DirtyRect {
 			left: 0,
 			top: 0,
@@ -136,6 +140,7 @@ pub(crate) fn render_region(
 	mode: Mode,
 	images: &[ImageObject],
 	selected_image: Option<usize>,
+	cursor_position: Option<(f32, f32)>,
 	requested_region: DirtyRect,
 ) {
 	let Some(clip) = clip_to_canvas(requested_region, frame.width, frame.height) else {
@@ -157,7 +162,7 @@ pub(crate) fn render_region(
 	canvas.fill_region(background);
 
 	if mode == Mode::Editing {
-		canvas.draw_dot_pattern();
+		canvas.draw_dot_pattern(cursor_position);
 	}
 
 	for object in images {
@@ -173,22 +178,27 @@ pub(crate) fn render_region(
 			canvas.draw_add_button();
 		}
 		canvas.draw_quit_button();
+		canvas.draw_mode_label();
 	}
 }
 
+pub(crate) fn dot_effect_bounds(x: f32, y: f32) -> DirtyRect {
+	editor_chrome::dot_effect_bounds(x, y)
+}
+
 pub(crate) fn object_visual_bounds(object: &ImageObject) -> DirtyRect {
-	let angle = object.placement.rotation_degrees.to_radians();
-	let half_width = (angle.cos().abs() * object.placement.width
-		+ angle.sin().abs() * object.placement.height)
-		/ 2.0;
-	let half_height = (angle.sin().abs() * object.placement.width
-		+ angle.cos().abs() * object.placement.height)
-		/ 2.0;
+	let outline = geometry::image_outline_bounds(
+		object.placement.center_x,
+		object.placement.center_y,
+		object.placement.width,
+		object.placement.height,
+		object.placement.rotation_degrees,
+	);
 	let mut bounds = DirtyRect {
-		left: (object.placement.center_x - half_width).floor() as i32,
-		top: (object.placement.center_y - half_height).floor() as i32,
-		right: (object.placement.center_x + half_width).ceil() as i32,
-		bottom: (object.placement.center_y + half_height).ceil() as i32,
+		left: outline.left.floor() as i32,
+		top: outline.top.floor() as i32,
+		right: outline.right.ceil() as i32,
+		bottom: outline.bottom.ceil() as i32,
 	};
 
 	for (x, y) in selection_handle_points(object) {

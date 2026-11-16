@@ -4,7 +4,7 @@ use std::{thread, time::Duration};
 
 use windows::{
 	Win32::{
-		Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, LPARAM, WPARAM},
+		Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, LPARAM, WPARAM},
 		System::Threading::CreateMutexW,
 		UI::WindowsAndMessaging::{FindWindowW, PostMessageW, WM_APP},
 	},
@@ -45,10 +45,8 @@ pub(super) fn notify_existing_instance() {
 	for _ in 0..WINDOW_LOOKUP_ATTEMPTS {
 		if let Ok(window) = unsafe { FindWindowW(WINDOW_CLASS_NAME, PCWSTR::null()) } {
 			if !window.0.is_null()
-				&& unsafe {
-					PostMessageW(window, SHOW_EDITOR_MESSAGE, WPARAM(0), LPARAM(0))
-				}
-				.is_ok()
+				&& unsafe { PostMessageW(window, SHOW_EDITOR_MESSAGE, WPARAM(0), LPARAM(0)) }
+					.is_ok()
 			{
 				return;
 			}

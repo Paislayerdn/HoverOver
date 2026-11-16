@@ -4,11 +4,9 @@ use std::io;
 
 use windows::Win32::{
 	Foundation::HWND,
-	UI::{
-		Input::KeyboardAndMouse::{
-			GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, MOD_CONTROL, MOD_NOREPEAT,
-			MOD_SHIFT, VK_F1,
-		},
+	UI::Input::KeyboardAndMouse::{
+		GetAsyncKeyState, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey, UnregisterHotKey,
+		VK_F1,
 	},
 };
 

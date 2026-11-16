@@ -6,9 +6,8 @@ use windows::{
 		Foundation::{HWND, POINT},
 		Graphics::Gdi::ClientToScreen,
 		UI::WindowsAndMessaging::{
-			AppendMenuW, CreatePopupMenu, DestroyMenu, SetForegroundWindow,
-			TrackPopupMenu, HMENU, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED,
-			TPM_RETURNCMD, TPM_RIGHTBUTTON,
+			AppendMenuW, CreatePopupMenu, DestroyMenu, HMENU, MF_CHECKED, MF_SEPARATOR, MF_STRING,
+			MF_UNCHECKED, SetForegroundWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
 		},
 	},
 	core::{PCWSTR, Result, w},
@@ -56,12 +55,7 @@ pub(super) fn show(
 			w!("Flip vertical"),
 		)?;
 		AppendMenuW(menu.0, MF_SEPARATOR, 0, PCWSTR::null())?;
-		AppendMenuW(
-			menu.0,
-			MF_STRING,
-			COMMAND_SET_OPACITY,
-			w!("Set opacity..."),
-		)?;
+		AppendMenuW(menu.0, MF_STRING, COMMAND_SET_OPACITY, w!("Set opacity..."))?;
 		AppendMenuW(
 			menu.0,
 			MF_STRING,

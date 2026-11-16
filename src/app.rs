@@ -3,8 +3,8 @@
 use crate::{
 	geometry::{self, local_to_screen, rotate},
 	image_file::ImageData,
-	model::{DirtyRect, ImageObject, ImagePlacement, Mode},
-	renderer,
+	model::{DirtyRect, ImageObject, ImagePlacement, Mode, clamp_opacity_percent},
+	renderer, snapping,
 };
 
 const MIN_IMAGE_SIZE: f32 = 12.0;
@@ -55,6 +55,7 @@ pub struct Application {
 	selected_image: Option<usize>,
 	drag: Option<Drag>,
 	dirty_region: Option<DirtyRect>,
+	cursor_position: Option<(f32, f32)>,
 }
 
 impl Application {
@@ -67,6 +68,7 @@ impl Application {
 			selected_image: None,
 			drag: None,
 			dirty_region: None,
+			cursor_position: None,
 		}
 	}
 
@@ -117,6 +119,55 @@ impl Application {
 			self.screen_width,
 			self.screen_height,
 		));
+	}
+
+	pub fn selected_position_offset(&self) -> Option<(i32, i32)> {
+		let image_index = self.selected_image?;
+		let object = self.images.get(image_index)?;
+		Some((
+			(object.placement.center_x - self.screen_width as f32 / 2.0).round() as i32,
+			(object.placement.center_y - self.screen_height as f32 / 2.0).round() as i32,
+		))
+	}
+
+	pub fn set_selected_position_offset(&mut self, x: i32, y: i32) -> bool {
+		let Some(image_index) = self.selected_image else {
+			return false;
+		};
+		let Some(object) = self.images.get_mut(image_index) else {
+			return false;
+		};
+
+		let old_bounds = renderer::object_visual_bounds(object);
+		object.placement.center_x = self.screen_width as f32 / 2.0 + x as f32;
+		object.placement.center_y = self.screen_height as f32 / 2.0 + y as f32;
+		let new_bounds = renderer::object_visual_bounds(object);
+		self.add_dirty_region(old_bounds.union(new_bounds));
+		true
+	}
+
+	pub fn selected_opacity_percent(&self) -> Option<u8> {
+		let image_index = self.selected_image?;
+		Some(self.images.get(image_index)?.placement.opacity_percent)
+	}
+
+	pub fn set_selected_opacity_percent(&mut self, value: i32) -> bool {
+		let Some(image_index) = self.selected_image else {
+			return false;
+		};
+		let Some(object) = self.images.get_mut(image_index) else {
+			return false;
+		};
+
+		let opacity_percent = clamp_opacity_percent(value);
+		if object.placement.opacity_percent == opacity_percent {
+			return false;
+		}
+		let old_bounds = renderer::object_visual_bounds(object);
+		object.placement.opacity_percent = opacity_percent;
+		let new_bounds = renderer::object_visual_bounds(object);
+		self.add_dirty_region(old_bounds.union(new_bounds));
+		true
 	}
 
 	pub fn select_image_for_context_menu(&mut self, x: f32, y: f32) -> Option<(bool, bool)> {
@@ -226,8 +277,18 @@ impl Application {
 	}
 
 	pub fn mouse_move(&mut self, x: f32, y: f32, shift_is_down: bool) -> bool {
+		let mut cursor_moved = false;
+		if self.mode == Mode::Editing && self.cursor_position != Some((x, y)) {
+			if let Some((old_x, old_y)) = self.cursor_position {
+				self.add_dirty_region(renderer::dot_effect_bounds(old_x, old_y));
+			}
+			self.cursor_position = Some((x, y));
+			self.add_dirty_region(renderer::dot_effect_bounds(x, y));
+			cursor_moved = true;
+		}
+
 		let Some(drag) = self.drag.as_ref() else {
-			return false;
+			return cursor_moved;
 		};
 		let Some(object) = self.images.get_mut(drag.image_index) else {
 			return false;
@@ -236,8 +297,22 @@ impl Application {
 
 		match drag.kind {
 			DragKind::Move => {
-				object.placement.center_x = drag.start_center_x + x - drag.start_mouse_x;
-				object.placement.center_y = drag.start_center_y + y - drag.start_mouse_y;
+				let wanted_center_x = drag.start_center_x + x - drag.start_mouse_x;
+				let wanted_center_y = drag.start_center_y + y - drag.start_mouse_y;
+				let outline = geometry::image_outline_bounds(
+					wanted_center_x,
+					wanted_center_y,
+					object.placement.width,
+					object.placement.height,
+					object.placement.rotation_degrees,
+				);
+				let (snap_x, snap_y) = snapping::snap_offset(
+					outline,
+					self.screen_width as f32,
+					self.screen_height as f32,
+				);
+				object.placement.center_x = wanted_center_x + snap_x;
+				object.placement.center_y = wanted_center_y + snap_y;
 			}
 			DragKind::Rotate => {
 				let current_pointer_angle = (y - drag.start_center_y)
@@ -261,6 +336,25 @@ impl Application {
 		true
 	}
 
+	pub fn nudge_selected(&mut self, offset_x: i32, offset_y: i32) -> bool {
+		if self.mode != Mode::Editing {
+			return false;
+		}
+		let Some(image_index) = self.selected_image else {
+			return false;
+		};
+		let Some(object) = self.images.get_mut(image_index) else {
+			return false;
+		};
+
+		let old_bounds = renderer::object_visual_bounds(object);
+		object.placement.center_x += offset_x as f32;
+		object.placement.center_y += offset_y as f32;
+		let new_bounds = renderer::object_visual_bounds(object);
+		self.add_dirty_region(old_bounds.union(new_bounds));
+		true
+	}
+
 	pub fn mouse_up(&mut self) {
 		self.drag = None;
 	}
@@ -273,6 +367,7 @@ impl Application {
 			self.mode,
 			&self.images,
 			self.selected_image,
+			self.cursor_position,
 		)
 	}
 
@@ -281,7 +376,14 @@ impl Application {
 	}
 
 	pub fn render_region(&self, frame: &mut ImageData, region: DirtyRect) {
-		renderer::render_region(frame, self.mode, &self.images, self.selected_image, region);
+		renderer::render_region(
+			frame,
+			self.mode,
+			&self.images,
+			self.selected_image,
+			self.cursor_position,
+			region,
+		);
 	}
 
 	fn mark_full_redraw(&mut self) {
@@ -459,4 +561,28 @@ fn screen_to_local(object: &ImageObject, x: f32, y: f32) -> (f32, f32) {
 
 fn distance_squared(x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
 	(x1 - x2).powi(2) + (y1 - y2).powi(2)
+}
+
+#[cfg(test)]
+mod tests {
+	use crate::image_file::ImageData;
+
+	use super::Application;
+
+	#[test]
+	fn new_images_use_zero_center_relative_position() {
+		let mut application = Application::new(1920, 1080);
+		application.add_image(
+			ImageData {
+				width: 2,
+				height: 2,
+				rgba_pixels: vec![255; 16],
+			},
+			"sample.png".to_string(),
+		);
+
+		assert_eq!(application.selected_position_offset(), Some((0, 0)));
+		assert!(application.set_selected_position_offset(-25, 40));
+		assert_eq!(application.selected_position_offset(), Some((-25, 40)));
+	}
 }

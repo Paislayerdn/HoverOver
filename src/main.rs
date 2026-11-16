@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use windows::{
-	Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK},
+	Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW},
 	core::{HSTRING, w},
 };
 
@@ -10,6 +10,7 @@ mod geometry;
 mod image_file;
 mod model;
 mod renderer;
+mod snapping;
 mod windows_overlay;
 
 fn main() {

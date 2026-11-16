@@ -7,18 +7,20 @@ use windows::{
 	Win32::{
 		Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
 		System::LibraryLoader::GetModuleHandleW,
+		UI::Input::KeyboardAndMouse::{SetFocus, VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP},
 		UI::WindowsAndMessaging::{
 			CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
 			DispatchMessageW, GWL_EXSTYLE, GWLP_USERDATA, GetMessageW, GetSystemMetrics,
-			GetWindowLongPtrW, HWND_TOPMOST, MSG, PostQuitMessage, RegisterClassW,
-			SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW,
-			SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowLongPtrW,
-			SetWindowPos, ShowWindow, TranslateMessage, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
-			WM_HOTKEY, WM_MOUSEMOVE, WM_NCCREATE, WM_RBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-			WS_EX_TRANSPARENT, WS_POPUP,
+			GetWindowLongPtrW, HWND_TOPMOST, MB_ICONERROR, MB_OK, MSG, MessageBoxW,
+			PostQuitMessage, RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+			SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW, SWP_FRAMECHANGED, SWP_NOMOVE,
+			SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+			TranslateMessage, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+			WM_MOUSEMOVE, WM_NCCREATE, WM_RBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+			WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 		},
 	},
-	core::{Error as WinError, PCWSTR},
+	core::{Error as WinError, HSTRING, PCWSTR, w},
 };
 
 use crate::{
@@ -32,8 +34,9 @@ mod keyboard;
 use keyboard::ToggleHotkey;
 mod surface;
 use surface::DibSurface;
-mod file_dialog;
 mod context_menu;
+mod file_dialog;
+mod numeric_input;
 mod single_instance;
 
 pub(super) const WINDOW_CLASS_NAME: PCWSTR = windows::core::w!("HoverOver");
@@ -58,6 +61,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 			screen,
 			surface,
 			frame,
+			modal_ui_open: false,
 		});
 		let instance = GetModuleHandleW(PCWSTR::null())?;
 		register_window_class(instance.into())?;
@@ -121,6 +125,7 @@ struct Runtime {
 	screen: ScreenBounds,
 	surface: DibSurface,
 	frame: image_file::ImageData,
+	modal_ui_open: bool,
 }
 
 unsafe fn virtual_screen_bounds() -> ScreenBounds {
@@ -186,29 +191,48 @@ unsafe extern "system" fn window_procedure(
 
 	match message {
 		WM_HOTKEY if wparam.0 as i32 == keyboard::TOGGLE_HOTKEY_ID => {
-			update_editor_mode(window, runtime, EditorModeRequest::Toggle);
+			if !runtime.modal_ui_open {
+				update_editor_mode(window, runtime, EditorModeRequest::Toggle);
+			}
 			LRESULT(0)
 		}
 		single_instance::SHOW_EDITOR_MESSAGE => {
-			update_editor_mode(window, runtime, EditorModeRequest::Editing);
+			if !runtime.modal_ui_open {
+				update_editor_mode(window, runtime, EditorModeRequest::Editing);
+			}
 			LRESULT(0)
 		}
 		WM_LBUTTONDOWN => {
+			unsafe {
+				let _ = SetFocus(window);
+			}
 			let (x, y) = mouse_position(lparam);
 			match runtime.application.mouse_down(x, y) {
-				MouseAction::AddImage => match unsafe { file_dialog::choose_image(window) } {
-					Ok(Some(path)) => match image_file::load(&path) {
-						Ok(image) => runtime.application.add_image(
-							image,
-							path.file_name()
-								.map(|name| name.to_string_lossy().into_owned())
-								.unwrap_or_default(),
-						),
-						Err(error) => eprintln!("Could not load selected image: {error}"),
-					},
-					Ok(None) => {}
-					Err(error) => eprintln!("Could not open the image picker: {error}"),
-				},
+				MouseAction::AddImage => {
+					runtime.modal_ui_open = true;
+					let result = unsafe { file_dialog::choose_image(window) };
+					runtime.modal_ui_open = false;
+					unsafe {
+						let _ = SetFocus(window);
+					}
+					match result {
+						Ok(Some(path)) => match image_file::load(&path) {
+							Ok(image) => runtime.application.add_image(
+								image,
+								path.file_name()
+									.map(|name| name.to_string_lossy().into_owned())
+									.unwrap_or_default(),
+							),
+							Err(error) => {
+								report_user_error(format!("Could not load selected image: {error}"))
+							}
+						},
+						Ok(None) => {}
+						Err(error) => {
+							report_user_error(format!("Could not open the image picker: {error}"))
+						}
+					}
+				}
 				MouseAction::Quit => {
 					unsafe {
 						let _ = DestroyWindow(window);
@@ -228,6 +252,17 @@ unsafe extern "system" fn window_procedure(
 			}
 			LRESULT(0)
 		}
+		WM_KEYDOWN => {
+			if runtime.application.mode == Mode::Editing {
+				if let Some((offset_x, offset_y)) = arrow_key_offset(wparam.0 as u32) {
+					if runtime.application.nudge_selected(offset_x, offset_y) {
+						redraw_or_log(window, runtime);
+					}
+					return LRESULT(0);
+				}
+			}
+			unsafe { DefWindowProcW(window, message, wparam, lparam) }
+		}
 		WM_LBUTTONUP => {
 			let (x, y) = mouse_position(lparam);
 			let shift_is_down = keyboard::shift_is_down();
@@ -239,18 +274,21 @@ unsafe extern "system" fn window_procedure(
 			LRESULT(0)
 		}
 		WM_RBUTTONUP => {
+			unsafe {
+				let _ = SetFocus(window);
+			}
 			let (x, y) = mouse_position(lparam);
-			if let Some((flip_x, flip_y)) = runtime
-				.application
-				.select_image_for_context_menu(x, y)
+			if let Some((flip_x, flip_y)) = runtime.application.select_image_for_context_menu(x, y)
 			{
 				redraw_or_log(window, runtime);
-				match context_menu::show(window, x, y, flip_x, flip_y) {
-					Ok(action) => {
-						runtime.application.apply_context_menu_action(action);
-						redraw_or_log(window, runtime);
+				runtime.modal_ui_open = true;
+				let result = context_menu::show(window, x, y, flip_x, flip_y);
+				runtime.modal_ui_open = false;
+				match result {
+					Ok(action) => handle_context_menu_action(window, runtime, action),
+					Err(error) => {
+						report_user_error(format!("Could not show the image menu: {error}"))
 					}
-					Err(error) => eprintln!("Could not show the image menu: {error}"),
 				}
 			}
 			LRESULT(0)
@@ -262,6 +300,70 @@ unsafe extern "system" fn window_procedure(
 			LRESULT(0)
 		}
 		_ => unsafe { DefWindowProcW(window, message, wparam, lparam) },
+	}
+}
+
+fn handle_context_menu_action(window: HWND, runtime: &mut Runtime, action: crate::app::MenuAction) {
+	match action {
+		crate::app::MenuAction::SetPosition => {
+			let Some((current_x, current_y)) = runtime.application.selected_position_offset()
+			else {
+				return;
+			};
+			runtime.modal_ui_open = true;
+			let result = numeric_input::position(window, current_x, current_y);
+			runtime.modal_ui_open = false;
+			match result {
+				Ok(Some((x, y))) => {
+					runtime.application.set_selected_position_offset(x, y);
+					redraw_or_log(window, runtime);
+				}
+				Ok(None) => {}
+				Err(error) => {
+					report_user_error(format!("Could not open the position input: {error}"))
+				}
+			}
+		}
+		crate::app::MenuAction::SetOpacity => {
+			let Some(current_opacity) = runtime.application.selected_opacity_percent() else {
+				return;
+			};
+			runtime.modal_ui_open = true;
+			let result = numeric_input::opacity(window, current_opacity);
+			runtime.modal_ui_open = false;
+			match result {
+				Ok(Some(value)) => {
+					runtime.application.set_selected_opacity_percent(value);
+					redraw_or_log(window, runtime);
+				}
+				Ok(None) => {}
+				Err(error) => {
+					report_user_error(format!("Could not open the opacity input: {error}"))
+				}
+			}
+		}
+		_ => {
+			runtime.application.apply_context_menu_action(action);
+			redraw_or_log(window, runtime);
+		}
+	}
+}
+
+fn arrow_key_offset(key: u32) -> Option<(i32, i32)> {
+	match key {
+		key if key == VK_LEFT.0 as u32 => Some((-1, 0)),
+		key if key == VK_RIGHT.0 as u32 => Some((1, 0)),
+		key if key == VK_UP.0 as u32 => Some((0, -1)),
+		key if key == VK_DOWN.0 as u32 => Some((0, 1)),
+		_ => None,
+	}
+}
+
+fn report_user_error(message: String) {
+	eprintln!("{message}");
+	let message_text = HSTRING::from(message);
+	unsafe {
+		let _ = MessageBoxW(None, &message_text, w!("HoverOver"), MB_OK | MB_ICONERROR);
 	}
 }
 
