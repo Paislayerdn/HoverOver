@@ -30,8 +30,14 @@ pub(super) fn draw_image(canvas: &mut Canvas, object: &ImageObject) {
 		for x in left..right {
 			let offset_x = x as f32 + 0.5 - object.placement.center_x;
 			let offset_y = y as f32 + 0.5 - object.placement.center_y;
-			let local_x = offset_x * cosine + offset_y * sine;
-			let local_y = -offset_x * sine + offset_y * cosine;
+			let mut local_x = offset_x * cosine + offset_y * sine;
+			let mut local_y = -offset_x * sine + offset_y * cosine;
+			if object.placement.flip_x {
+				local_x = -local_x;
+			}
+			if object.placement.flip_y {
+				local_y = -local_y;
+			}
 			if local_x.abs() > object.placement.width / 2.0
 				|| local_y.abs() > object.placement.height / 2.0
 			{

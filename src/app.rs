@@ -16,6 +16,16 @@ pub enum MouseAction {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) enum MenuAction {
+	Cancel,
+	Delete,
+	FlipHorizontal,
+	FlipVertical,
+	SetOpacity,
+	SetPosition,
+}
+
+#[derive(Clone, Copy)]
 enum DragKind {
 	Move,
 	Resize(usize),
@@ -70,6 +80,18 @@ impl Application {
 		self.mark_full_redraw();
 	}
 
+	pub fn enter_editing_mode(&mut self) -> bool {
+		if self.mode == Mode::Editing {
+			return false;
+		}
+
+		self.drag = None;
+		self.selected_image = None;
+		self.mode = Mode::Editing;
+		self.mark_full_redraw();
+		true
+	}
+
 	pub fn add_image(&mut self, image: ImageData, source_file_name: String) {
 		let width = image.width as f32;
 		let height = image.height as f32;
@@ -95,6 +117,61 @@ impl Application {
 			self.screen_width,
 			self.screen_height,
 		));
+	}
+
+	pub fn select_image_for_context_menu(&mut self, x: f32, y: f32) -> Option<(bool, bool)> {
+		if self.mode != Mode::Editing {
+			return None;
+		}
+
+		let image_index = self.hit_image(x, y)?;
+		if self.selected_image != Some(image_index) {
+			let mut dirty = renderer::object_visual_bounds(&self.images[image_index]);
+			if let Some(previous_index) = self.selected_image {
+				dirty = dirty.union(renderer::object_visual_bounds(&self.images[previous_index]));
+			} else {
+				dirty = dirty.union(renderer::toolbar_bounds(
+					self.screen_width,
+					self.screen_height,
+				));
+			}
+			self.selected_image = Some(image_index);
+			self.add_dirty_region(dirty);
+		}
+
+		let placement = &self.images[image_index].placement;
+		Some((placement.flip_x, placement.flip_y))
+	}
+
+	pub fn apply_context_menu_action(&mut self, action: MenuAction) {
+		let Some(image_index) = self.selected_image else {
+			return;
+		};
+
+		match action {
+			MenuAction::Delete => {
+				let old_bounds = renderer::object_visual_bounds(&self.images[image_index]);
+				self.images.remove(image_index);
+				self.selected_image = None;
+				self.drag = None;
+				self.add_dirty_region(old_bounds.union(renderer::toolbar_bounds(
+					self.screen_width,
+					self.screen_height,
+				)));
+			}
+			MenuAction::FlipHorizontal | MenuAction::FlipVertical => {
+				let old_bounds = renderer::object_visual_bounds(&self.images[image_index]);
+				let placement = &mut self.images[image_index].placement;
+				match action {
+					MenuAction::FlipHorizontal => placement.flip_x = !placement.flip_x,
+					MenuAction::FlipVertical => placement.flip_y = !placement.flip_y,
+					_ => {}
+				}
+				let new_bounds = renderer::object_visual_bounds(&self.images[image_index]);
+				self.add_dirty_region(old_bounds.union(new_bounds));
+			}
+			MenuAction::Cancel | MenuAction::SetOpacity | MenuAction::SetPosition => {}
+		}
 	}
 
 	pub fn mouse_down(&mut self, x: f32, y: f32) -> MouseAction {
