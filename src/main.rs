@@ -8,7 +8,10 @@ use windows::{
 mod app;
 mod geometry;
 mod image_file;
+mod image_store;
 mod model;
+mod preset_session;
+mod presets;
 mod renderer;
 mod snapping;
 mod windows_overlay;

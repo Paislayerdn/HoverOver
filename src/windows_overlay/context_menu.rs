@@ -58,7 +58,7 @@ pub(super) fn show(
 			menu.0,
 			MF_STRING,
 			COMMAND_SET_PROPERTIES,
-			w!("Set properties..."),
+			w!("Edit properties..."),
 		)?;
 
 		let mut cursor = POINT {

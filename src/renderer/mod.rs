@@ -12,33 +12,64 @@ mod image_drawing;
 mod pixel_primitives;
 
 pub(crate) const ROTATION_HANDLE_GAP: f32 = 32.0;
-pub(crate) const TOOLBAR_WIDTH: i32 = 180;
+pub(crate) const TOOLBAR_BUTTON_WIDTH: i32 = 100;
 pub(crate) const TOOLBAR_HEIGHT: i32 = 58;
 pub(crate) const TOOLBAR_BOTTOM_GAP: i32 = 28;
-pub(crate) const QUIT_BUTTON_SIZE: i32 = 40;
-pub(crate) const QUIT_BUTTON_RIGHT_GAP: i32 = 28;
-pub(crate) const QUIT_BUTTON_BOTTOM_GAP: i32 = 28;
+pub(crate) const TOOLBAR_BUTTON_GAP: i32 = 16;
+const TOOLBAR_BUTTONS: [ToolbarButton; 3] = [
+	ToolbarButton::Presets,
+	ToolbarButton::Add,
+	ToolbarButton::Quit,
+];
 
-pub(crate) fn toolbar_bounds(width: u32, height: u32) -> DirtyRect {
-	let left = (width as i32 - TOOLBAR_WIDTH) / 2;
-	let top = height as i32 - TOOLBAR_BOTTOM_GAP - TOOLBAR_HEIGHT;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolbarButton {
+	Presets,
+	Add,
+	Quit,
+}
+
+pub(crate) fn toolbar_button_bounds(
+	button: ToolbarButton,
+	screen_width: u32,
+	screen_height: u32,
+) -> DirtyRect {
+	let row_width = TOOLBAR_BUTTON_WIDTH * TOOLBAR_BUTTONS.len() as i32
+		+ TOOLBAR_BUTTON_GAP * (TOOLBAR_BUTTONS.len() as i32 - 1);
+	let button_index = match button {
+		ToolbarButton::Presets => 0,
+		ToolbarButton::Add => 1,
+		ToolbarButton::Quit => 2,
+	};
+	let left = (screen_width as i32 - row_width) / 2
+		+ button_index * (TOOLBAR_BUTTON_WIDTH + TOOLBAR_BUTTON_GAP);
+	let top = screen_height as i32 - TOOLBAR_BOTTOM_GAP - TOOLBAR_HEIGHT;
 	DirtyRect {
 		left,
 		top,
-		right: left + TOOLBAR_WIDTH,
+		right: left + TOOLBAR_BUTTON_WIDTH,
 		bottom: top + TOOLBAR_HEIGHT,
 	}
 }
 
-pub(crate) fn quit_button_bounds(width: u32, height: u32) -> DirtyRect {
-	let left = width as i32 - QUIT_BUTTON_RIGHT_GAP - QUIT_BUTTON_SIZE;
-	let top = height as i32 - QUIT_BUTTON_BOTTOM_GAP - QUIT_BUTTON_SIZE;
+pub(crate) fn toolbar_row_bounds(screen_width: u32, screen_height: u32) -> DirtyRect {
+	let left = toolbar_button_bounds(ToolbarButton::Presets, screen_width, screen_height).left;
+	let right = toolbar_button_bounds(ToolbarButton::Quit, screen_width, screen_height).right;
+	let top = screen_height as i32 - TOOLBAR_BOTTOM_GAP - TOOLBAR_HEIGHT;
 	DirtyRect {
 		left,
 		top,
-		right: left + QUIT_BUTTON_SIZE,
-		bottom: top + QUIT_BUTTON_SIZE,
+		right,
+		bottom: top + TOOLBAR_HEIGHT,
 	}
+}
+
+pub(crate) fn visible_toolbar_buttons(
+	selected_image: Option<usize>,
+) -> impl Iterator<Item = ToolbarButton> {
+	TOOLBAR_BUTTONS
+		.into_iter()
+		.filter(move |_| selected_image.is_none())
 }
 
 pub(super) struct Canvas<'a> {
@@ -92,12 +123,8 @@ impl Canvas<'_> {
 		image_drawing::draw_selection(self, object);
 	}
 
-	fn draw_add_button(&mut self) {
-		editor_chrome::draw_add_button(self);
-	}
-
-	fn draw_quit_button(&mut self) {
-		editor_chrome::draw_quit_button(self);
+	fn draw_toolbar_button(&mut self, button: ToolbarButton) {
+		editor_chrome::draw_toolbar_button(self, button);
 	}
 
 	fn draw_mode_label(&mut self) {
@@ -174,10 +201,10 @@ pub(crate) fn render_region(
 			if let Some(object) = images.get(index) {
 				canvas.draw_selection(object);
 			}
-		} else {
-			canvas.draw_add_button();
 		}
-		canvas.draw_quit_button();
+		for button in visible_toolbar_buttons(selected_image) {
+			canvas.draw_toolbar_button(button);
+		}
 		canvas.draw_mode_label();
 	}
 }
@@ -241,4 +268,45 @@ pub(crate) fn selection_handle_points(object: &ImageObject) -> [(f32, f32); 9] {
 		-object.placement.height / 2.0 - ROTATION_HANDLE_GAP,
 	);
 	points
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{
+		TOOLBAR_BUTTON_GAP, TOOLBAR_BUTTON_WIDTH, TOOLBAR_BUTTONS, TOOLBAR_HEIGHT, ToolbarButton,
+		toolbar_button_bounds, visible_toolbar_buttons,
+	};
+
+	#[test]
+	fn toolbar_buttons_are_equal_sized_ordered_and_inside_supported_screens() {
+		for (screen_width, screen_height) in [(1366, 768), (1920, 1080), (800, 600)] {
+			let bounds: Vec<_> = TOOLBAR_BUTTONS
+				.into_iter()
+				.map(|button| toolbar_button_bounds(button, screen_width, screen_height))
+				.collect();
+			let first = bounds[0];
+			for current in &bounds {
+				assert_eq!(current.right - current.left, TOOLBAR_BUTTON_WIDTH);
+				assert_eq!(current.bottom - current.top, TOOLBAR_HEIGHT);
+				assert!(current.left >= 0);
+				assert!(current.top >= 0);
+				assert!(current.right <= screen_width as i32);
+				assert!(current.bottom <= screen_height as i32);
+				assert_eq!(current.top, first.top);
+			}
+			for pair in bounds.windows(2) {
+				assert!(pair[0].right < pair[1].left);
+				assert_eq!(pair[1].left - pair[0].right, TOOLBAR_BUTTON_GAP);
+			}
+			assert!(bounds[0].left < bounds[1].left);
+			assert!(bounds[1].left < bounds[2].left);
+		}
+		assert_eq!(TOOLBAR_BUTTONS[0], ToolbarButton::Presets);
+	}
+
+	#[test]
+	fn selecting_an_image_hides_every_toolbar_button() {
+		assert_eq!(visible_toolbar_buttons(None).count(), TOOLBAR_BUTTONS.len());
+		assert_eq!(visible_toolbar_buttons(Some(0)).count(), 0);
+	}
 }

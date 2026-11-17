@@ -18,3 +18,13 @@ pub fn load(path: &Path) -> Result<ImageData, Box<dyn Error>> {
 		rgba_pixels: image.into_raw(),
 	})
 }
+
+pub fn load_from_bytes(bytes: &[u8]) -> Result<ImageData, image::ImageError> {
+	let image = image::load_from_memory(bytes)?.into_rgba8();
+	let (width, height) = image.dimensions();
+	Ok(ImageData {
+		width,
+		height,
+		rgba_pixels: image.into_raw(),
+	})
+}

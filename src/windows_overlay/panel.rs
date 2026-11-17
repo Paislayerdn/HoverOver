@@ -14,11 +14,11 @@ use windows::{
 				CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CallWindowProcW, CreateWindowExW,
 				DefWindowProcW, DestroyWindow, EN_CHANGE, EN_KILLFOCUS, ES_AUTOHSCROLL,
 				GWLP_USERDATA, GWLP_WNDPROC, GetWindowLongPtrW, GetWindowTextLengthW,
-				GetWindowTextW, HMENU, HWND_TOPMOST, RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOMOVE,
-				SWP_NOSIZE, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-				WINDOW_STYLE, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_KEYDOWN, WM_NCCREATE,
-				WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-				WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+				GetWindowTextW, HMENU, HWND_TOPMOST, IsWindowVisible, RegisterClassW, SW_HIDE,
+				SW_SHOW, SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetWindowLongPtrW, SetWindowPos,
+				ShowWindow, WINDOW_STYLE, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_KEYDOWN,
+				WM_NCCREATE, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_TOOLWINDOW,
+				WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 			},
 		},
 	},
@@ -152,7 +152,26 @@ impl Panel {
 		}
 	}
 
-	pub(super) fn show_and_focus(&mut self, values: Option<(i32, i32, u8)>, field: FocusField) {
+	pub(super) fn show_and_focus(
+		&mut self,
+		values: Option<(i32, i32, u8)>,
+		field: FocusField,
+		screen: (i32, i32, i32, i32),
+	) {
+		if unsafe { IsWindowVisible(self.window).as_bool() } == false {
+			let (left, top, width, height) = screen;
+			unsafe {
+				let _ = SetWindowPos(
+					self.window,
+					HWND_TOPMOST,
+					left + (width - PANEL_WIDTH) / 2,
+					top + (height - PANEL_HEIGHT) / 2,
+					0,
+					0,
+					SWP_NOSIZE,
+				);
+			}
+		}
 		self.show_values(values);
 		self.focus_field(field);
 	}

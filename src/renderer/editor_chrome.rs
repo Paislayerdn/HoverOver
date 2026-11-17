@@ -2,9 +2,7 @@
 
 use crate::model::DirtyRect;
 
-use super::{
-	Canvas, QUIT_BUTTON_SIZE, TOOLBAR_HEIGHT, TOOLBAR_WIDTH, quit_button_bounds, toolbar_bounds,
-};
+use super::{Canvas, TOOLBAR_BUTTON_WIDTH, TOOLBAR_HEIGHT, ToolbarButton, toolbar_button_bounds};
 
 // Tune these values to change the grid spacing and cursor-radius falloff.
 const DOT_SPACING: i32 = 16;
@@ -12,60 +10,48 @@ const DOT_MAX_RADIUS: f32 = 6.5;
 const DOT_MIN_RADIUS: f32 = 2.25;
 const DOT_EFFECT_DISTANCE: f32 = 152.0;
 
-pub(super) fn draw_add_button(canvas: &mut Canvas) {
-	let bounds = toolbar_bounds(canvas.width, canvas.height);
+pub(super) fn draw_toolbar_button(canvas: &mut Canvas, button: ToolbarButton) {
+	let bounds = toolbar_button_bounds(button, canvas.width, canvas.height);
 	canvas.fill_rect(
 		bounds.left,
 		bounds.top,
-		TOOLBAR_WIDTH,
+		TOOLBAR_BUTTON_WIDTH,
 		TOOLBAR_HEIGHT,
 		[255, 255, 255, 225],
 	);
 	canvas.draw_rect_outline(
 		bounds.left,
 		bounds.top,
-		TOOLBAR_WIDTH,
+		TOOLBAR_BUTTON_WIDTH,
 		TOOLBAR_HEIGHT,
 		[90, 90, 90, 240],
 	);
-	let center_x = canvas.width as i32 / 2;
+	let center_x = (bounds.left + bounds.right) / 2;
 	let center_y = bounds.top + TOOLBAR_HEIGHT / 2;
-	canvas.fill_rect(center_x - 1, center_y - 11, 3, 23, [35, 35, 35, 255]);
-	canvas.fill_rect(center_x - 11, center_y - 1, 23, 3, [35, 35, 35, 255]);
+	match button {
+		ToolbarButton::Add => {
+			canvas.fill_rect(center_x - 1, center_y - 11, 3, 23, [35, 35, 35, 255]);
+			canvas.fill_rect(center_x - 11, center_y - 1, 23, 3, [35, 35, 35, 255]);
+		}
+		ToolbarButton::Presets => draw_toolbar_glyph(canvas, bounds, 'P'),
+		ToolbarButton::Quit => draw_toolbar_glyph(canvas, bounds, 'Q'),
+	}
 }
 
-pub(super) fn draw_quit_button(canvas: &mut Canvas) {
-	let bounds = quit_button_bounds(canvas.width, canvas.height);
-	canvas.fill_rect(
-		bounds.left,
-		bounds.top,
-		QUIT_BUTTON_SIZE,
-		QUIT_BUTTON_SIZE,
-		[255, 255, 255, 235],
-	);
-	canvas.draw_rect_outline(
-		bounds.left,
-		bounds.top,
-		QUIT_BUTTON_SIZE,
-		QUIT_BUTTON_SIZE,
-		[65, 65, 65, 255],
-	);
-	// A small bitmap letter keeps the prototype independent of system fonts.
-	let q_rows = [
-		0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
-	];
-	let pixel_size = 2;
-	let glyph_left = bounds.left + (QUIT_BUTTON_SIZE - 5 * pixel_size) / 2;
-	let glyph_top = bounds.top + (QUIT_BUTTON_SIZE - 7 * pixel_size) / 2;
-	for (row, bits) in q_rows.into_iter().enumerate() {
+fn draw_toolbar_glyph(canvas: &mut Canvas, bounds: crate::model::DirtyRect, character: char) {
+	const PIXEL_SIZE: i32 = 3;
+	let glyph_rows = glyph_rows(character);
+	let glyph_left = bounds.left + (TOOLBAR_BUTTON_WIDTH - 5 * PIXEL_SIZE) / 2;
+	let glyph_top = bounds.top + (TOOLBAR_HEIGHT - 7 * PIXEL_SIZE) / 2;
+	for (row_index, row_bits) in glyph_rows.into_iter().enumerate() {
 		for column in 0..5 {
-			if bits & (1 << (4 - column)) != 0 {
+			if row_bits & (1 << (4 - column)) != 0 {
 				canvas.fill_rect(
-					glyph_left + column * pixel_size,
-					glyph_top + row as i32 * pixel_size,
-					pixel_size,
-					pixel_size,
-					[25, 25, 25, 255],
+					glyph_left + column * PIXEL_SIZE,
+					glyph_top + row_index as i32 * PIXEL_SIZE,
+					PIXEL_SIZE,
+					PIXEL_SIZE,
+					[35, 35, 35, 255],
 				);
 			}
 		}
@@ -124,6 +110,12 @@ pub(super) fn draw_mode_label(canvas: &mut Canvas) {
 
 fn glyph_rows(character: char) -> [u8; 7] {
 	match character {
+		'P' => [
+			0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+		],
+		'Q' => [
+			0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
+		],
 		'H' => [
 			0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
 		],

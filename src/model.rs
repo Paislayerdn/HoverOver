@@ -37,9 +37,10 @@ pub enum Mode {
 	Editing,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ImagePlacement {
-	pub(crate) source_file_name: String,
+	/// Plain file name inside the images folder. Never a full path.
+	pub(crate) stored_file_name: String,
 	pub(crate) center_x: f32,
 	pub(crate) center_y: f32,
 	pub(crate) width: f32,

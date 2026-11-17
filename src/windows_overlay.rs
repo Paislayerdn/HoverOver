@@ -3,6 +3,8 @@
 
 use std::error::Error;
 
+use base64::{Engine, engine::general_purpose::STANDARD};
+
 use windows::{
 	Win32::{
 		Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
@@ -15,14 +17,14 @@ use windows::{
 		UI::WindowsAndMessaging::{
 			CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
 			DispatchMessageW, GWL_EXSTYLE, GWLP_USERDATA, GetCursorPos, GetMessageW,
-			GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, LoadCursorW,
-			MB_ICONERROR, MB_OK, MSG, MessageBoxW, PostQuitMessage, RegisterClassW,
-			SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW,
-			SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowLongPtrW,
-			SetWindowPos, ShowWindow, TranslateMessage, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY,
-			WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
-			WM_RBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-			WS_EX_TRANSPARENT, WS_POPUP,
+			GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDYES, LoadCursorW,
+			MB_DEFBUTTON2, MB_ICONERROR, MB_ICONQUESTION, MB_OK, MB_YESNO, MSG, MessageBoxW,
+			PostQuitMessage, RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+			SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW, SWP_FRAMECHANGED, SWP_NOMOVE,
+			SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+			TranslateMessage, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN,
+			WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_RBUTTONUP, WNDCLASSW,
+			WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 		},
 	},
 	core::{Error as WinError, HSTRING, PCWSTR, w},
@@ -30,7 +32,7 @@ use windows::{
 
 use crate::{
 	app::{Application, MouseAction},
-	image_file,
+	image_file, image_store,
 	model::Mode,
 	renderer,
 };
@@ -43,6 +45,8 @@ mod context_menu;
 mod file_dialog;
 mod panel;
 use panel::{FocusField, Panel, PanelAction};
+mod presets_menu;
+use presets_menu::PresetsMenuAction;
 mod single_instance;
 
 pub(super) const WINDOW_CLASS_NAME: PCWSTR = windows::core::w!("HoverOver");
@@ -198,6 +202,9 @@ unsafe extern "system" fn window_procedure(
 	if runtime_pointer.is_null() {
 		return unsafe { DefWindowProcW(window, message, wparam, lparam) };
 	}
+	if unsafe { (*runtime_pointer).modal_ui_open } && message != WM_DESTROY {
+		return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+	}
 	let runtime = unsafe { &mut *runtime_pointer };
 
 	match message {
@@ -220,6 +227,30 @@ unsafe extern "system" fn window_procedure(
 			handle_panel_actions(window, runtime);
 			let (x, y) = mouse_position(lparam);
 			match runtime.application.mouse_down(x, y) {
+				MouseAction::OpenPresets => {
+					let button = renderer::toolbar_button_bounds(
+						renderer::ToolbarButton::Presets,
+						runtime.screen.width as u32,
+						runtime.screen.height as u32,
+					);
+					runtime.modal_ui_open = true;
+					let menu_result = presets_menu::show(
+						window,
+						runtime.screen.left + button.left,
+						runtime.screen.top + button.top,
+					);
+					runtime.modal_ui_open = false;
+					match menu_result {
+						Ok(PresetsMenuAction::Save) => save_current_preset(window, runtime),
+						Ok(PresetsMenuAction::Load) => load_selected_preset(window, runtime),
+						Ok(PresetsMenuAction::Cancel) => {}
+						Err(error) => report_user_error(
+							window,
+							runtime,
+							format!("Could not show the presets menu: {error}"),
+						),
+					}
+				}
 				MouseAction::AddImage => {
 					runtime.modal_ui_open = true;
 					let result = unsafe { file_dialog::choose_image(window) };
@@ -229,20 +260,30 @@ unsafe extern "system" fn window_procedure(
 					}
 					match result {
 						Ok(Some(path)) => match image_file::load(&path) {
-							Ok(image) => runtime.application.add_image(
-								image,
-								path.file_name()
-									.map(|name| name.to_string_lossy().into_owned())
-									.unwrap_or_default(),
+							Ok(image) => match image_store::app_image_folder()
+								.and_then(|folder| image_store::import_image_into(&folder, &path))
+							{
+								Ok(stored_file_name) => {
+									runtime.application.add_image(image, stored_file_name)
+								}
+								Err(error) => report_user_error(
+									window,
+									runtime,
+									format!("Could not store selected image: {error}"),
+								),
+							},
+							Err(error) => report_user_error(
+								window,
+								runtime,
+								format!("Could not load selected image: {error}"),
 							),
-							Err(error) => {
-								report_user_error(format!("Could not load selected image: {error}"))
-							}
 						},
 						Ok(None) => {}
-						Err(error) => {
-							report_user_error(format!("Could not open the image picker: {error}"))
-						}
+						Err(error) => report_user_error(
+							window,
+							runtime,
+							format!("Could not open the image picker: {error}"),
+						),
 					}
 					refresh_panel_values(runtime);
 				}
@@ -334,9 +375,11 @@ unsafe extern "system" fn window_procedure(
 				runtime.modal_ui_open = false;
 				match result {
 					Ok(action) => handle_context_menu_action(window, runtime, action),
-					Err(error) => {
-						report_user_error(format!("Could not show the image menu: {error}"))
-					}
+					Err(error) => report_user_error(
+						window,
+						runtime,
+						format!("Could not show the image menu: {error}"),
+					),
 				}
 			}
 			LRESULT(0)
@@ -355,7 +398,16 @@ fn handle_context_menu_action(window: HWND, runtime: &mut Runtime, action: crate
 	match action {
 		crate::app::MenuAction::SetProperties => {
 			if let Some(panel) = runtime.panel.as_mut() {
-				panel.show_and_focus(runtime.application.selected_panel_values(), FocusField::X);
+				panel.show_and_focus(
+					runtime.application.selected_panel_values(),
+					FocusField::X,
+					(
+						runtime.screen.left,
+						runtime.screen.top,
+						runtime.screen.width,
+						runtime.screen.height,
+					),
+				);
 			}
 		}
 		_ => {
@@ -404,6 +456,158 @@ fn refresh_panel_values(runtime: &mut Runtime) {
 	}
 }
 
+fn save_current_preset(window: HWND, runtime: &mut Runtime) {
+	runtime.modal_ui_open = true;
+	let chosen_path = unsafe {
+		file_dialog::choose_preset_to_save(window, runtime.application.current_preset_path())
+	};
+	runtime.modal_ui_open = false;
+	let path = match chosen_path {
+		Ok(Some(path)) => path,
+		Ok(None) => return,
+		Err(error) => {
+			report_user_error(
+				window,
+				runtime,
+				format!("Could not open the preset save dialog: {error}"),
+			);
+			return;
+		}
+	};
+	let folder = match image_store::app_image_folder() {
+		Ok(folder) => folder,
+		Err(error) => {
+			report_user_error(
+				window,
+				runtime,
+				format!("Could not find the image folder: {error}"),
+			);
+			return;
+		}
+	};
+	let placements = runtime.application.current_placements();
+	let mut preset = crate::presets::PresetFile::from_placements(
+		&placements,
+		runtime.screen.width as u32,
+		runtime.screen.height as u32,
+	);
+	for image in &mut preset.images {
+		let image_path = folder.join(&image.stored_file_name);
+		match std::fs::read(&image_path) {
+			Ok(bytes) => image.image_data_base64 = STANDARD.encode(bytes),
+			Err(error) => {
+				report_user_error(
+					window,
+					runtime,
+					format!("Could not read image '{}': {error}", image_path.display()),
+				);
+				return;
+			}
+		}
+	}
+	if let Err(error) = crate::presets::save_preset_file(&path, &preset) {
+		report_user_error(
+			window,
+			runtime,
+			format!("Could not save the preset: {error}"),
+		);
+		return;
+	}
+	runtime.application.mark_preset_saved(&path);
+}
+
+fn load_selected_preset(window: HWND, runtime: &mut Runtime) {
+	if runtime.application.has_unsaved_changes()
+		&& !ask_yes_no(
+			window,
+			runtime,
+			"Discard unsaved changes and load a preset?",
+		) {
+		return;
+	}
+	runtime.modal_ui_open = true;
+	let chosen_path = unsafe { file_dialog::choose_preset_to_open(window) };
+	runtime.modal_ui_open = false;
+	let path = match chosen_path {
+		Ok(Some(path)) => path,
+		Ok(None) => return,
+		Err(error) => {
+			report_user_error(
+				window,
+				runtime,
+				format!("Could not open the preset picker: {error}"),
+			);
+			return;
+		}
+	};
+	let preset = match crate::presets::load_preset_file(&path) {
+		Ok(preset) => preset,
+		Err(error) => {
+			report_user_error(
+				window,
+				runtime,
+				format!("Could not load the preset: {error}"),
+			);
+			return;
+		}
+	};
+	let (entries, mut problems) =
+		preset.into_placements(runtime.screen.width as u32, runtime.screen.height as u32);
+	let folder = match image_store::app_image_folder() {
+		Ok(folder) => folder,
+		Err(error) => {
+			report_user_error(
+				window,
+				runtime,
+				format!("Could not find the image folder: {error}"),
+			);
+			return;
+		}
+	};
+	let (images, image_problems) = image_store::load_embedded_images(&folder, entries);
+	problems.extend(image_problems);
+	runtime.application.replace_images(images);
+	runtime.application.mark_preset_saved(&path);
+	refresh_panel_values(runtime);
+	redraw_or_log(window, runtime);
+	if !problems.is_empty() {
+		let message = format!(
+			"Some preset entries could not be loaded:\n\n{}",
+			problems.join("\n")
+		);
+		show_message_box(window, runtime, &message, MB_OK | MB_ICONERROR);
+	}
+}
+
+fn ask_yes_no(window: HWND, runtime: &mut Runtime, message: &str) -> bool {
+	let message_text = HSTRING::from(message);
+	runtime.modal_ui_open = true;
+	let result = unsafe {
+		MessageBoxW(
+			window,
+			&message_text,
+			w!("HoverOver"),
+			MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+		)
+	};
+	runtime.modal_ui_open = false;
+	result == IDYES
+}
+
+fn show_message_box(
+	window: HWND,
+	runtime: &mut Runtime,
+	message: &str,
+	flags: windows::Win32::UI::WindowsAndMessaging::MESSAGEBOX_STYLE,
+) {
+	let message_text = HSTRING::from(message);
+	runtime.modal_ui_open = true;
+	unsafe {
+		let _ = MessageBoxW(window, &message_text, w!("HoverOver"), flags);
+	}
+	runtime.modal_ui_open = false;
+}
+
 fn arrow_key_offset(key: u32) -> Option<(i32, i32)> {
 	match key {
 		key if key == VK_LEFT.0 as u32 => Some((-1, 0)),
@@ -414,12 +618,9 @@ fn arrow_key_offset(key: u32) -> Option<(i32, i32)> {
 	}
 }
 
-fn report_user_error(message: String) {
+fn report_user_error(window: HWND, runtime: &mut Runtime, message: String) {
 	eprintln!("{message}");
-	let message_text = HSTRING::from(message);
-	unsafe {
-		let _ = MessageBoxW(None, &message_text, w!("HoverOver"), MB_OK | MB_ICONERROR);
-	}
+	show_message_box(window, runtime, &message, MB_OK | MB_ICONERROR);
 }
 
 #[derive(Clone, Copy)]

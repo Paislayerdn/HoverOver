@@ -4,7 +4,9 @@ use crate::{
 	geometry::{self, local_to_screen, rotate},
 	image_file::ImageData,
 	model::{DirtyRect, ImageObject, ImagePlacement, Mode, clamp_opacity_percent},
-	renderer, snapping,
+	preset_session::PresetSession,
+	renderer::{self, ToolbarButton},
+	snapping,
 };
 
 const MIN_IMAGE_SIZE: f32 = 12.0;
@@ -12,6 +14,7 @@ const PANEL_Y_DIRECTION: i32 = 1;
 
 pub enum MouseAction {
 	None,
+	OpenPresets,
 	AddImage,
 	Quit,
 }
@@ -56,6 +59,7 @@ pub struct Application {
 	drag: Option<Drag>,
 	dirty_region: Option<DirtyRect>,
 	cursor_position: Option<(f32, f32)>,
+	preset_session: PresetSession,
 }
 
 impl Application {
@@ -69,6 +73,7 @@ impl Application {
 			drag: None,
 			dirty_region: None,
 			cursor_position: None,
+			preset_session: PresetSession::default(),
 		}
 	}
 
@@ -94,7 +99,7 @@ impl Application {
 		true
 	}
 
-	pub fn add_image(&mut self, image: ImageData, source_file_name: String) {
+	pub fn add_image(&mut self, image: ImageData, stored_file_name: String) {
 		let width = image.width as f32;
 		let height = image.height as f32;
 		let image_index = self.images.len();
@@ -102,7 +107,7 @@ impl Application {
 		self.images.push(ImageObject {
 			image,
 			placement: ImagePlacement {
-				source_file_name,
+				stored_file_name,
 				center_x: self.screen_width as f32 / 2.0,
 				center_y: self.screen_height as f32 / 2.0,
 				width,
@@ -115,10 +120,38 @@ impl Application {
 		});
 		self.selected_image = Some(image_index);
 		self.add_dirty_region(renderer::object_visual_bounds(&self.images[image_index]));
-		self.add_dirty_region(renderer::toolbar_bounds(
+		self.add_dirty_region(renderer::toolbar_row_bounds(
 			self.screen_width,
 			self.screen_height,
 		));
+	}
+
+	pub(crate) fn replace_images(&mut self, images: Vec<ImageObject>) {
+		self.images = images;
+		self.selected_image = None;
+		self.drag = None;
+		self.mark_full_redraw();
+	}
+
+	pub(crate) fn current_placements(&self) -> Vec<ImagePlacement> {
+		self.images
+			.iter()
+			.map(|object| object.placement.clone())
+			.collect()
+	}
+
+	pub(crate) fn has_unsaved_changes(&self) -> bool {
+		self.preset_session
+			.has_unsaved_changes(&self.current_placements())
+	}
+
+	pub(crate) fn mark_preset_saved(&mut self, path: &std::path::Path) {
+		self.preset_session
+			.mark_saved(path, &self.current_placements());
+	}
+
+	pub(crate) fn current_preset_path(&self) -> Option<&std::path::Path> {
+		self.preset_session.current_preset_path()
 	}
 
 	pub fn selected_panel_values(&self) -> Option<(i32, i32, u8)> {
@@ -193,7 +226,7 @@ impl Application {
 			if let Some(previous_index) = self.selected_image {
 				dirty = dirty.union(renderer::object_visual_bounds(&self.images[previous_index]));
 			} else {
-				dirty = dirty.union(renderer::toolbar_bounds(
+				dirty = dirty.union(renderer::toolbar_row_bounds(
 					self.screen_width,
 					self.screen_height,
 				));
@@ -217,7 +250,7 @@ impl Application {
 				self.images.remove(image_index);
 				self.selected_image = None;
 				self.drag = None;
-				self.add_dirty_region(old_bounds.union(renderer::toolbar_bounds(
+				self.add_dirty_region(old_bounds.union(renderer::toolbar_row_bounds(
 					self.screen_width,
 					self.screen_height,
 				)));
@@ -242,12 +275,12 @@ impl Application {
 			return MouseAction::None;
 		}
 
-		if self.point_is_over_quit_button(x, y) {
-			return MouseAction::Quit;
-		}
-
-		if self.selected_image.is_none() && self.point_is_over_add_button(x, y) {
-			return MouseAction::AddImage;
+		if let Some(button) = self.hit_toolbar_button(x, y) {
+			return match button {
+				ToolbarButton::Presets => MouseAction::OpenPresets,
+				ToolbarButton::Add => MouseAction::AddImage,
+				ToolbarButton::Quit => MouseAction::Quit,
+			};
 		}
 
 		if let Some(index) = self.selected_image {
@@ -263,7 +296,7 @@ impl Application {
 				if let Some(previous) = self.selected_image {
 					dirty = dirty.union(renderer::object_visual_bounds(&self.images[previous]));
 				} else {
-					dirty = dirty.union(renderer::toolbar_bounds(
+					dirty = dirty.union(renderer::toolbar_row_bounds(
 						self.screen_width,
 						self.screen_height,
 					));
@@ -286,7 +319,7 @@ impl Application {
 		};
 
 		let dirty = renderer::object_visual_bounds(&self.images[image_index]).union(
-			renderer::toolbar_bounds(self.screen_width, self.screen_height),
+			renderer::toolbar_row_bounds(self.screen_width, self.screen_height),
 		);
 		self.selected_image = None;
 		self.drag = None;
@@ -461,20 +494,15 @@ impl Application {
 			.map(|(index, _)| index)
 	}
 
-	fn point_is_over_add_button(&self, x: f32, y: f32) -> bool {
-		let bounds = renderer::toolbar_bounds(self.screen_width, self.screen_height);
-		x >= bounds.left as f32
-			&& x <= bounds.right as f32
-			&& y >= bounds.top as f32
-			&& y <= bounds.bottom as f32
-	}
-
-	fn point_is_over_quit_button(&self, x: f32, y: f32) -> bool {
-		let bounds = renderer::quit_button_bounds(self.screen_width, self.screen_height);
-		x >= bounds.left as f32
-			&& x <= bounds.right as f32
-			&& y >= bounds.top as f32
-			&& y <= bounds.bottom as f32
+	fn hit_toolbar_button(&self, x: f32, y: f32) -> Option<ToolbarButton> {
+		renderer::visible_toolbar_buttons(self.selected_image).find(|button| {
+			let bounds =
+				renderer::toolbar_button_bounds(*button, self.screen_width, self.screen_height);
+			x >= bounds.left as f32
+				&& x <= bounds.right as f32
+				&& y >= bounds.top as f32
+				&& y <= bounds.bottom as f32
+		})
 	}
 }
 
@@ -623,5 +651,23 @@ mod tests {
 				screen_y
 			);
 		}
+	}
+
+	#[test]
+	fn replacing_images_clears_selection_and_any_active_drag() {
+		let mut application = Application::new(100, 100);
+		application.add_image(
+			ImageData {
+				width: 20,
+				height: 20,
+				rgba_pixels: vec![255; 20 * 20 * 4],
+			},
+			"first.png".to_string(),
+		);
+		let _ = application.mouse_down(50.0, 50.0);
+		assert!(application.is_dragging());
+		application.replace_images(Vec::new());
+		assert!(!application.is_dragging());
+		assert_eq!(application.selected_panel_values(), None);
 	}
 }
