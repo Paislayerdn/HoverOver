@@ -16,8 +16,7 @@ use windows::{
 const COMMAND_DELETE: usize = 1;
 const COMMAND_FLIP_HORIZONTAL: usize = 2;
 const COMMAND_FLIP_VERTICAL: usize = 3;
-const COMMAND_SET_OPACITY: usize = 4;
-const COMMAND_SET_POSITION: usize = 5;
+const COMMAND_SET_PROPERTIES: usize = 4;
 
 struct PopupMenu(HMENU);
 
@@ -55,12 +54,11 @@ pub(super) fn show(
 			w!("Flip vertical"),
 		)?;
 		AppendMenuW(menu.0, MF_SEPARATOR, 0, PCWSTR::null())?;
-		AppendMenuW(menu.0, MF_STRING, COMMAND_SET_OPACITY, w!("Set opacity..."))?;
 		AppendMenuW(
 			menu.0,
 			MF_STRING,
-			COMMAND_SET_POSITION,
-			w!("Set position..."),
+			COMMAND_SET_PROPERTIES,
+			w!("Set properties..."),
 		)?;
 
 		let mut cursor = POINT {
@@ -90,8 +88,7 @@ fn menu_action(command: usize) -> MenuAction {
 		COMMAND_DELETE => MenuAction::Delete,
 		COMMAND_FLIP_HORIZONTAL => MenuAction::FlipHorizontal,
 		COMMAND_FLIP_VERTICAL => MenuAction::FlipVertical,
-		COMMAND_SET_OPACITY => MenuAction::SetOpacity,
-		COMMAND_SET_POSITION => MenuAction::SetPosition,
+		COMMAND_SET_PROPERTIES => MenuAction::SetProperties,
 		_ => MenuAction::Cancel,
 	}
 }

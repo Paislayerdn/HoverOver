@@ -8,6 +8,7 @@ use crate::{
 };
 
 const MIN_IMAGE_SIZE: f32 = 12.0;
+const PANEL_Y_DIRECTION: i32 = 1;
 
 pub enum MouseAction {
 	None,
@@ -21,8 +22,7 @@ pub(crate) enum MenuAction {
 	Delete,
 	FlipHorizontal,
 	FlipVertical,
-	SetOpacity,
-	SetPosition,
+	SetProperties,
 }
 
 #[derive(Clone, Copy)]
@@ -121,13 +121,30 @@ impl Application {
 		));
 	}
 
-	pub fn selected_position_offset(&self) -> Option<(i32, i32)> {
+	pub fn selected_panel_values(&self) -> Option<(i32, i32, u8)> {
 		let image_index = self.selected_image?;
 		let object = self.images.get(image_index)?;
-		Some((
-			(object.placement.center_x - self.screen_width as f32 / 2.0).round() as i32,
+		let x = (object.placement.center_x - self.screen_width as f32 / 2.0).round() as i32;
+		let y = panel_y_from_screen_y(
 			(object.placement.center_y - self.screen_height as f32 / 2.0).round() as i32,
-		))
+		);
+		Some((x, y, object.placement.opacity_percent))
+	}
+
+	pub fn set_selected_center(&mut self, x: i32, panel_y: i32) -> bool {
+		self.set_selected_position_offset(x, screen_y_from_panel_y(panel_y))
+	}
+
+	pub fn set_selected_opacity(&mut self, value: i32) -> bool {
+		self.set_selected_opacity_percent(value)
+	}
+
+	pub fn end_drag(&mut self) {
+		self.drag = None;
+	}
+
+	pub fn is_dragging(&self) -> bool {
+		self.drag.is_some()
 	}
 
 	pub fn set_selected_position_offset(&mut self, x: i32, y: i32) -> bool {
@@ -144,11 +161,6 @@ impl Application {
 		let new_bounds = renderer::object_visual_bounds(object);
 		self.add_dirty_region(old_bounds.union(new_bounds));
 		true
-	}
-
-	pub fn selected_opacity_percent(&self) -> Option<u8> {
-		let image_index = self.selected_image?;
-		Some(self.images.get(image_index)?.placement.opacity_percent)
 	}
 
 	pub fn set_selected_opacity_percent(&mut self, value: i32) -> bool {
@@ -221,7 +233,7 @@ impl Application {
 				let new_bounds = renderer::object_visual_bounds(&self.images[image_index]);
 				self.add_dirty_region(old_bounds.union(new_bounds));
 			}
-			MenuAction::Cancel | MenuAction::SetOpacity | MenuAction::SetPosition => {}
+			MenuAction::Cancel | MenuAction::SetProperties => {}
 		}
 	}
 
@@ -263,17 +275,23 @@ impl Application {
 			return MouseAction::None;
 		}
 
-		if let Some(index) = self.selected_image {
-			let mut dirty = renderer::object_visual_bounds(&self.images[index]);
-			dirty = dirty.union(renderer::toolbar_bounds(
-				self.screen_width,
-				self.screen_height,
-			));
-			self.selected_image = None;
-			self.add_dirty_region(dirty);
-		}
-		self.drag = None;
+		self.deselect_selected_image();
 		MouseAction::None
+	}
+
+	pub fn deselect_selected_image(&mut self) -> bool {
+		let Some(image_index) = self.selected_image else {
+			self.drag = None;
+			return false;
+		};
+
+		let dirty = renderer::object_visual_bounds(&self.images[image_index]).union(
+			renderer::toolbar_bounds(self.screen_width, self.screen_height),
+		);
+		self.selected_image = None;
+		self.drag = None;
+		self.add_dirty_region(dirty);
+		true
 	}
 
 	pub fn mouse_move(&mut self, x: f32, y: f32, shift_is_down: bool) -> bool {
@@ -460,6 +478,14 @@ impl Application {
 	}
 }
 
+fn panel_y_from_screen_y(screen_y: i32) -> i32 {
+	screen_y * PANEL_Y_DIRECTION
+}
+
+fn screen_y_from_panel_y(panel_y: i32) -> i32 {
+	panel_y * PANEL_Y_DIRECTION
+}
+
 fn resize_image(
 	object: &mut ImageObject,
 	drag: &Drag,
@@ -567,7 +593,7 @@ fn distance_squared(x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
 mod tests {
 	use crate::image_file::ImageData;
 
-	use super::Application;
+	use super::{Application, panel_y_from_screen_y, screen_y_from_panel_y};
 
 	#[test]
 	fn new_images_use_zero_center_relative_position() {
@@ -581,8 +607,21 @@ mod tests {
 			"sample.png".to_string(),
 		);
 
-		assert_eq!(application.selected_position_offset(), Some((0, 0)));
+		assert_eq!(application.selected_panel_values(), Some((0, 0, 100)));
 		assert!(application.set_selected_position_offset(-25, 40));
-		assert_eq!(application.selected_position_offset(), Some((-25, 40)));
+		assert_eq!(application.selected_panel_values(), Some((-25, 40, 100)));
+		assert!(application.deselect_selected_image());
+		assert_eq!(application.selected_panel_values(), None);
+		assert!(!application.deselect_selected_image());
+	}
+
+	#[test]
+	fn panel_y_conversion_preserves_the_existing_downward_positive_direction() {
+		for screen_y in [-100, 0, 37] {
+			assert_eq!(
+				screen_y_from_panel_y(panel_y_from_screen_y(screen_y)),
+				screen_y
+			);
+		}
 	}
 }

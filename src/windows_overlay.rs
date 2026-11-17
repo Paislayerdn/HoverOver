@@ -5,19 +5,24 @@ use std::error::Error;
 
 use windows::{
 	Win32::{
-		Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
+		Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
+		Graphics::Gdi::ScreenToClient,
 		System::LibraryLoader::GetModuleHandleW,
-		UI::Input::KeyboardAndMouse::{SetFocus, VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP},
+		UI::Input::KeyboardAndMouse::{
+			GetCapture, GetFocus, ReleaseCapture, SetCapture, SetFocus, VK_DOWN, VK_LEFT,
+			VK_RETURN, VK_RIGHT, VK_UP,
+		},
 		UI::WindowsAndMessaging::{
 			CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-			DispatchMessageW, GWL_EXSTYLE, GWLP_USERDATA, GetMessageW, GetSystemMetrics,
-			GetWindowLongPtrW, HWND_TOPMOST, MB_ICONERROR, MB_OK, MSG, MessageBoxW,
-			PostQuitMessage, RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-			SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW, SWP_FRAMECHANGED, SWP_NOMOVE,
-			SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-			TranslateMessage, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-			WM_MOUSEMOVE, WM_NCCREATE, WM_RBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
-			WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+			DispatchMessageW, GWL_EXSTYLE, GWLP_USERDATA, GetCursorPos, GetMessageW,
+			GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, LoadCursorW,
+			MB_ICONERROR, MB_OK, MSG, MessageBoxW, PostQuitMessage, RegisterClassW,
+			SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW,
+			SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowLongPtrW,
+			SetWindowPos, ShowWindow, TranslateMessage, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY,
+			WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
+			WM_RBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+			WS_EX_TRANSPARENT, WS_POPUP,
 		},
 	},
 	core::{Error as WinError, HSTRING, PCWSTR, w},
@@ -36,7 +41,8 @@ mod surface;
 use surface::DibSurface;
 mod context_menu;
 mod file_dialog;
-mod numeric_input;
+mod panel;
+use panel::{FocusField, Panel, PanelAction};
 mod single_instance;
 
 pub(super) const WINDOW_CLASS_NAME: PCWSTR = windows::core::w!("HoverOver");
@@ -62,6 +68,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 			surface,
 			frame,
 			modal_ui_open: false,
+			panel: None,
 		});
 		let instance = GetModuleHandleW(PCWSTR::null())?;
 		register_window_class(instance.into())?;
@@ -95,6 +102,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 				return Err(error.into());
 			}
 		};
+		runtime.panel = Some(Panel::create(window, instance.into())?);
+		refresh_panel_values(&mut runtime);
 
 		runtime.surface.present_full(
 			window,
@@ -126,6 +135,7 @@ struct Runtime {
 	surface: DibSurface,
 	frame: image_file::ImageData,
 	modal_ui_open: bool,
+	panel: Option<Panel>,
 }
 
 unsafe fn virtual_screen_bounds() -> ScreenBounds {
@@ -142,6 +152,7 @@ unsafe fn register_window_class(instance: HINSTANCE) -> windows::core::Result<()
 		style: CS_HREDRAW | CS_VREDRAW,
 		lpfnWndProc: Some(window_procedure),
 		hInstance: instance,
+		hCursor: unsafe { LoadCursorW(None, IDC_ARROW)? },
 		lpszClassName: WINDOW_CLASS_NAME,
 		..Default::default()
 	};
@@ -206,6 +217,7 @@ unsafe extern "system" fn window_procedure(
 			unsafe {
 				let _ = SetFocus(window);
 			}
+			handle_panel_actions(window, runtime);
 			let (x, y) = mouse_position(lparam);
 			match runtime.application.mouse_down(x, y) {
 				MouseAction::AddImage => {
@@ -232,6 +244,7 @@ unsafe extern "system" fn window_procedure(
 							report_user_error(format!("Could not open the image picker: {error}"))
 						}
 					}
+					refresh_panel_values(runtime);
 				}
 				MouseAction::Quit => {
 					unsafe {
@@ -241,21 +254,38 @@ unsafe extern "system" fn window_procedure(
 				}
 				MouseAction::None => {}
 			}
+			if runtime.application.is_dragging() {
+				unsafe {
+					let _ = SetCapture(window);
+				}
+			}
+			refresh_panel_values(runtime);
 			redraw_or_log(window, runtime);
 			LRESULT(0)
 		}
 		WM_MOUSEMOVE => {
-			let (x, y) = mouse_position(lparam);
+			let (x, y) = current_mouse_position(window, lparam);
 			let shift_is_down = keyboard::shift_is_down();
 			if runtime.application.mouse_move(x, y, shift_is_down) {
 				redraw_or_log(window, runtime);
+				if runtime.application.is_dragging() {
+					refresh_panel_values(runtime);
+				}
 			}
 			LRESULT(0)
 		}
 		WM_KEYDOWN => {
-			if runtime.application.mode == Mode::Editing {
+			if runtime.application.mode == Mode::Editing && unsafe { GetFocus() } == window {
+				if wparam.0 as u32 == VK_RETURN.0 as u32 {
+					if runtime.application.deselect_selected_image() {
+						refresh_panel_values(runtime);
+						redraw_or_log(window, runtime);
+					}
+					return LRESULT(0);
+				}
 				if let Some((offset_x, offset_y)) = arrow_key_offset(wparam.0 as u32) {
 					if runtime.application.nudge_selected(offset_x, offset_y) {
+						refresh_panel_values(runtime);
 						redraw_or_log(window, runtime);
 					}
 					return LRESULT(0);
@@ -263,23 +293,41 @@ unsafe extern "system" fn window_procedure(
 			}
 			unsafe { DefWindowProcW(window, message, wparam, lparam) }
 		}
+		WM_CHAR if wparam.0 == 0x0d => LRESULT(0),
 		WM_LBUTTONUP => {
-			let (x, y) = mouse_position(lparam);
+			let (x, y) = current_mouse_position(window, lparam);
 			let shift_is_down = keyboard::shift_is_down();
 			let moved = runtime.application.mouse_move(x, y, shift_is_down);
 			runtime.application.mouse_up();
+			if unsafe { GetCapture() } == window {
+				unsafe {
+					let _ = ReleaseCapture();
+				}
+			}
+			refresh_panel_values(runtime);
 			if moved {
 				redraw_or_log(window, runtime);
 			}
+			LRESULT(0)
+		}
+		WM_CAPTURECHANGED => {
+			runtime.application.end_drag();
+			refresh_panel_values(runtime);
+			LRESULT(0)
+		}
+		panel::PANEL_ACTION_MESSAGE => {
+			handle_panel_actions(window, runtime);
 			LRESULT(0)
 		}
 		WM_RBUTTONUP => {
 			unsafe {
 				let _ = SetFocus(window);
 			}
+			handle_panel_actions(window, runtime);
 			let (x, y) = mouse_position(lparam);
 			if let Some((flip_x, flip_y)) = runtime.application.select_image_for_context_menu(x, y)
 			{
+				refresh_panel_values(runtime);
 				redraw_or_log(window, runtime);
 				runtime.modal_ui_open = true;
 				let result = context_menu::show(window, x, y, flip_x, flip_y);
@@ -305,47 +353,54 @@ unsafe extern "system" fn window_procedure(
 
 fn handle_context_menu_action(window: HWND, runtime: &mut Runtime, action: crate::app::MenuAction) {
 	match action {
-		crate::app::MenuAction::SetPosition => {
-			let Some((current_x, current_y)) = runtime.application.selected_position_offset()
-			else {
-				return;
-			};
-			runtime.modal_ui_open = true;
-			let result = numeric_input::position(window, current_x, current_y);
-			runtime.modal_ui_open = false;
-			match result {
-				Ok(Some((x, y))) => {
-					runtime.application.set_selected_position_offset(x, y);
-					redraw_or_log(window, runtime);
-				}
-				Ok(None) => {}
-				Err(error) => {
-					report_user_error(format!("Could not open the position input: {error}"))
-				}
-			}
-		}
-		crate::app::MenuAction::SetOpacity => {
-			let Some(current_opacity) = runtime.application.selected_opacity_percent() else {
-				return;
-			};
-			runtime.modal_ui_open = true;
-			let result = numeric_input::opacity(window, current_opacity);
-			runtime.modal_ui_open = false;
-			match result {
-				Ok(Some(value)) => {
-					runtime.application.set_selected_opacity_percent(value);
-					redraw_or_log(window, runtime);
-				}
-				Ok(None) => {}
-				Err(error) => {
-					report_user_error(format!("Could not open the opacity input: {error}"))
-				}
+		crate::app::MenuAction::SetProperties => {
+			if let Some(panel) = runtime.panel.as_mut() {
+				panel.show_and_focus(runtime.application.selected_panel_values(), FocusField::X);
 			}
 		}
 		_ => {
 			runtime.application.apply_context_menu_action(action);
+			refresh_panel_values(runtime);
 			redraw_or_log(window, runtime);
 		}
+	}
+}
+
+fn handle_panel_actions(window: HWND, runtime: &mut Runtime) {
+	let actions = match runtime.panel.as_mut() {
+		Some(panel) => panel.take_actions(),
+		None => return,
+	};
+	let mut image_changed = false;
+	for action in actions {
+		match action {
+			PanelAction::SetX(x) => {
+				if let Some((_, y, _)) = runtime.application.selected_panel_values() {
+					image_changed |= runtime.application.set_selected_center(x, y);
+				}
+			}
+			PanelAction::SetY(y) => {
+				if let Some((x, _, _)) = runtime.application.selected_panel_values() {
+					image_changed |= runtime.application.set_selected_center(x, y);
+				}
+			}
+			PanelAction::SetOpacity(opacity) => {
+				image_changed |= runtime.application.set_selected_opacity(opacity);
+			}
+			PanelAction::Hidden => unsafe {
+				let _ = SetFocus(window);
+			},
+		}
+	}
+	refresh_panel_values(runtime);
+	if image_changed {
+		redraw_or_log(window, runtime);
+	}
+}
+
+fn refresh_panel_values(runtime: &mut Runtime) {
+	if let Some(panel) = runtime.panel.as_mut() {
+		panel.set_values(runtime.application.selected_panel_values());
 	}
 }
 
@@ -387,6 +442,18 @@ fn update_editor_mode(window: HWND, runtime: &mut Runtime, request: EditorModeRe
 
 	if let Err(error) = unsafe { set_input_mode(window, runtime.application.mode) } {
 		eprintln!("Could not change HoverOver mode: {error}");
+	}
+	match runtime.application.mode {
+		Mode::Editing => {}
+		Mode::Display => {
+			if let Some(panel) = runtime.panel.as_mut() {
+				panel.set_values(None);
+				panel.hide();
+			}
+			unsafe {
+				let _ = SetFocus(window);
+			}
+		}
 	}
 	if let Err(error) = unsafe { redraw(window, runtime) } {
 		eprintln!("Could not redraw HoverOver: {error}");
@@ -466,4 +533,15 @@ fn mouse_position(lparam: LPARAM) -> (f32, f32) {
 	let x = (lparam.0 as u32 & 0xFFFF) as u16 as i16 as f32;
 	let y = ((lparam.0 as u32 >> 16) & 0xFFFF) as u16 as i16 as f32;
 	(x, y)
+}
+
+fn current_mouse_position(window: HWND, lparam: LPARAM) -> (f32, f32) {
+	let mut position = POINT::default();
+	if unsafe { GetCursorPos(&mut position) }.is_ok()
+		&& unsafe { ScreenToClient(window, &mut position) }.0 != 0
+	{
+		(position.x as f32, position.y as f32)
+	} else {
+		mouse_position(lparam)
+	}
 }
