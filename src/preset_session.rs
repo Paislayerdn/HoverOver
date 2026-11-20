@@ -41,6 +41,7 @@ mod tests {
 			flip_x: false,
 			flip_y: false,
 			opacity_percent: 100,
+			z_order: 0,
 		}
 	}
 

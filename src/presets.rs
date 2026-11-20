@@ -1,6 +1,7 @@
 //! Self-contained preset JSON and placement validation without UI dependencies.
 
 use std::{
+	collections::HashSet,
 	error::Error,
 	fs, io,
 	path::{Path, PathBuf},
@@ -12,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
 	geometry::image_outline_bounds,
 	model::{ImagePlacement, clamp_opacity_percent},
+	z_order::FIRST_IMAGE_Z,
 };
 
-const CURRENT_PRESET_VERSION: u32 = 1;
+const CURRENT_PRESET_VERSION: u32 = 2;
 const MIN_VISIBLE_IMAGE_PIXELS: f32 = 40.0;
 const MIN_IMAGE_SIZE: f32 = 12.0;
 const MAX_IMAGE_SIZE: f32 = 16_384.0;
@@ -85,6 +87,8 @@ pub(crate) struct PresetImage {
 	pub flip_x: bool,
 	pub flip_y: bool,
 	pub opacity_percent: u8,
+	#[serde(default)]
+	pub z_order: Option<i64>,
 }
 
 pub(crate) struct EmbeddedPresetImage {
@@ -113,6 +117,7 @@ impl PresetFile {
 					flip_x: placement.flip_x,
 					flip_y: placement.flip_y,
 					opacity_percent: placement.opacity_percent,
+					z_order: Some(i64::from(placement.z_order)),
 				})
 				.collect(),
 		}
@@ -122,20 +127,53 @@ impl PresetFile {
 		self,
 		screen_width: u32,
 		screen_height: u32,
-	) -> (Vec<EmbeddedPresetImage>, Vec<String>) {
-		if self.version != CURRENT_PRESET_VERSION {
-			return (
-				Vec::new(),
-				vec![format!(
-					"Preset version {} is not supported; expected version {}.",
-					self.version, CURRENT_PRESET_VERSION
-				)],
-			);
+	) -> Result<(Vec<EmbeddedPresetImage>, Vec<String>), String> {
+		if !matches!(self.version, 1 | CURRENT_PRESET_VERSION) {
+			return Err(format!(
+				"Preset version {} is not supported; expected version 1 or {}.",
+				self.version, CURRENT_PRESET_VERSION
+			));
 		}
 		let mut placements = Vec::new();
 		let mut problems = Vec::new();
+		let mut seen_z_values = HashSet::new();
 		for (index, preset_image) in self.images.into_iter().enumerate() {
 			let entry_number = index + 1;
+			let z_value = if self.version == 1 {
+				let position = u16::try_from(index).ok();
+				position.and_then(|offset| FIRST_IMAGE_Z.checked_add(offset))
+			} else {
+				match preset_image.z_order {
+					None => {
+						problems.push(format!(
+							"Image {entry_number} was skipped because its Z value is missing."
+						));
+						continue;
+					}
+					Some(value) => match u16::try_from(value) {
+						Ok(value) => Some(value),
+						Err(_) => {
+							problems.push(format!(
+								"Image {entry_number} was skipped because its Z value is outside 0 to 65535."
+							));
+							continue;
+						}
+					},
+				}
+			};
+			let Some(z_value) = z_value else {
+				problems.push(format!(
+					"Image {entry_number} was skipped because its legacy array position cannot fit in the Z range."
+				));
+				continue;
+			};
+			if seen_z_values.contains(&z_value) {
+				problems.push(format!(
+					"Image {entry_number} was skipped because Z {} duplicates an earlier image.",
+					z_value
+				));
+				continue;
+			}
 			let decoded_image_bytes = match STANDARD.decode(&preset_image.image_data_base64) {
 				Ok(bytes) => bytes,
 				Err(_) => {
@@ -175,14 +213,16 @@ impl PresetFile {
 				flip_x: preset_image.flip_x,
 				flip_y: preset_image.flip_y,
 				opacity_percent: clamp_opacity_percent(i32::from(preset_image.opacity_percent)),
+				z_order: z_value,
 			};
 			keep_placement_reachable(&mut placement, screen_width, screen_height);
+			seen_z_values.insert(z_value);
 			placements.push(EmbeddedPresetImage {
 				placement,
 				image_bytes: decoded_image_bytes,
 			});
 		}
-		(placements, problems)
+		Ok((placements, problems))
 	}
 }
 
@@ -315,7 +355,8 @@ pub(crate) fn load_preset_file(path: &Path) -> Result<PresetFile, PresetError> {
 #[cfg(test)]
 mod tests {
 	use super::{
-		PresetFile, PresetImage, keep_placement_reachable, load_preset_file, save_preset_file,
+		FIRST_IMAGE_Z, PresetFile, PresetImage, keep_placement_reachable, load_preset_file,
+		save_preset_file,
 	};
 	use crate::model::ImagePlacement;
 	use base64::{Engine, engine::general_purpose::STANDARD};
@@ -325,6 +366,15 @@ mod tests {
 		sync::atomic::{AtomicUsize, Ordering},
 		time::{SystemTime, UNIX_EPOCH},
 	};
+
+	fn convert_valid_preset(preset: PresetFile) -> (Vec<super::EmbeddedPresetImage>, Vec<String>) {
+		let conversion = preset.into_placements(1920, 1080);
+		assert!(conversion.is_ok(), "Preset conversion unexpectedly failed");
+		match conversion {
+			Ok(value) => value,
+			Err(error) => panic!("Preset conversion unexpectedly failed: {error}"),
+		}
+	}
 	static NEXT_TEST_FOLDER: AtomicUsize = AtomicUsize::new(0);
 	struct TemporaryFolder(PathBuf);
 	impl TemporaryFolder {
@@ -357,11 +407,12 @@ mod tests {
 			flip_x: true,
 			flip_y: false,
 			opacity_percent: 72,
+			z_order: 45_321,
 		}
 	}
 	fn sample_preset() -> PresetFile {
 		PresetFile {
-			version: 1,
+			version: 2,
 			images: vec![PresetImage {
 				stored_file_name: "label.png".to_string(),
 				image_data_base64: STANDARD.encode(b"example image bytes"),
@@ -373,6 +424,7 @@ mod tests {
 				flip_x: false,
 				flip_y: false,
 				opacity_percent: 100,
+				z_order: Some(0),
 			}],
 		}
 	}
@@ -391,34 +443,108 @@ mod tests {
 			None => return,
 		};
 		decoded.images[0].image_data_base64 = STANDARD.encode(b"embedded");
-		let (entries, problems) = decoded.into_placements(1920, 1080);
+		let (entries, problems) = convert_valid_preset(decoded);
 		assert!(problems.is_empty());
 		assert_eq!(entries.len(), 1);
 		assert!((entries[0].placement.center_x - original.center_x).abs() < 0.001);
 		assert!((entries[0].placement.center_y - original.center_y).abs() < 0.001);
 		assert_eq!(entries[0].image_bytes, b"embedded");
+		assert_eq!(entries[0].placement.z_order, original.z_order);
 	}
 	#[test]
 	fn invalid_entries_and_corrupt_base64_are_skipped_and_reported() {
 		let mut invalid = sample_preset().images.remove(0);
 		invalid.image_data_base64 = "%%%".to_string();
 		let preset = PresetFile {
-			version: 1,
+			version: 2,
 			images: vec![invalid],
 		};
-		let (entries, problems) = preset.into_placements(1920, 1080);
+		let (entries, problems) = convert_valid_preset(preset);
 		assert!(entries.is_empty());
 		assert_eq!(problems.len(), 1);
 	}
 	#[test]
 	fn unsupported_version_rejects_the_file_with_a_problem() {
 		let preset = PresetFile {
-			version: 2,
+			version: 3,
 			images: vec![sample_preset().images.remove(0)],
 		};
-		let (entries, problems) = preset.into_placements(1920, 1080);
-		assert!(entries.is_empty());
-		assert!(problems[0].contains("version 2 is not supported"));
+		assert!(
+			matches!(preset.into_placements(1920, 1080), Err(message) if message.contains("version 3 is not supported"))
+		);
+	}
+
+	#[test]
+	fn version_one_migrates_array_positions_to_first_image_z_and_preserves_order() {
+		let mut first = sample_preset().images.remove(0);
+		first.z_order = Some(500);
+		let second = first.clone();
+		let preset = PresetFile {
+			version: 1,
+			images: vec![first, second],
+		};
+		let (entries, problems) = convert_valid_preset(preset);
+		assert!(problems.is_empty());
+		assert_eq!(entries[0].placement.z_order, FIRST_IMAGE_Z);
+		assert_eq!(entries[1].placement.z_order, FIRST_IMAGE_Z + 1);
+	}
+
+	#[test]
+	fn version_two_skips_missing_duplicate_and_out_of_range_z_entries() {
+		let valid = sample_preset().images.remove(0);
+		let duplicate = valid.clone();
+		let mut missing = valid.clone();
+		missing.z_order = None;
+		let mut too_large = valid.clone();
+		too_large.z_order = Some(65_536);
+		let mut last_valid = valid.clone();
+		last_valid.z_order = Some(45_000);
+		let preset = PresetFile {
+			version: 2,
+			images: vec![valid, duplicate, missing, too_large, last_valid],
+		};
+		let (entries, problems) = convert_valid_preset(preset);
+		assert_eq!(entries.len(), 2);
+		assert_eq!(entries[0].placement.z_order, 0);
+		assert_eq!(entries[1].placement.z_order, 45_000);
+		assert_eq!(problems.len(), 3);
+	}
+
+	#[test]
+	fn invalid_earlier_entry_does_not_claim_its_z_value() {
+		let mut invalid_first = sample_preset().images.remove(0);
+		invalid_first.z_order = Some(5);
+		invalid_first.image_data_base64 = "%%%".to_string();
+		let mut valid_second = sample_preset().images.remove(0);
+		valid_second.z_order = Some(5);
+		let preset = PresetFile {
+			version: 2,
+			images: vec![invalid_first, valid_second],
+		};
+		let (entries, problems) = convert_valid_preset(preset);
+		assert_eq!(entries.len(), 1);
+		assert_eq!(entries[0].placement.z_order, 5);
+		assert_eq!(problems.len(), 1);
+		assert!(problems[0].contains("embedded image data is invalid"));
+	}
+
+	#[test]
+	fn version_one_json_without_z_fields_migrates_array_positions() {
+		let json = r#"{"version":1,"images":[{"stored_file_name":"first.png","image_data_base64":"AQ==","x":0.0,"y":0.0,"width":100.0,"height":80.0,"rotation_degrees":0.0,"flip_x":false,"flip_y":false,"opacity_percent":100},{"stored_file_name":"second.png","image_data_base64":"Ag==","x":0.0,"y":0.0,"width":100.0,"height":80.0,"rotation_degrees":0.0,"flip_x":false,"flip_y":false,"opacity_percent":100}]}"#;
+		let parsed = serde_json::from_str::<PresetFile>(json);
+		assert!(
+			parsed.is_ok(),
+			"Version 1 JSON without z_order should parse: {parsed:?}"
+		);
+		let preset = match parsed {
+			Ok(preset) => preset,
+			Err(error) => panic!("Version 1 JSON did not parse: {error}"),
+		};
+		let (entries, problems) = convert_valid_preset(preset);
+		assert!(problems.is_empty());
+		assert_eq!(entries.len(), 2);
+		assert_eq!(entries[0].placement.z_order, FIRST_IMAGE_Z);
+		assert_eq!(entries[1].placement.z_order, FIRST_IMAGE_Z + 1);
 	}
 	#[test]
 	fn path_save_load_round_trip_and_overwrite_leave_no_temporary_file() {

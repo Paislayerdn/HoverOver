@@ -252,38 +252,57 @@ unsafe extern "system" fn window_procedure(
 					}
 				}
 				MouseAction::AddImage => {
-					runtime.modal_ui_open = true;
-					let result = unsafe { file_dialog::choose_image(window) };
-					runtime.modal_ui_open = false;
-					unsafe {
-						let _ = SetFocus(window);
-					}
-					match result {
-						Ok(Some(path)) => match image_file::load(&path) {
-							Ok(image) => match image_store::app_image_folder()
-								.and_then(|folder| image_store::import_image_into(&folder, &path))
-							{
-								Ok(stored_file_name) => {
-									runtime.application.add_image(image, stored_file_name)
+					if !runtime.application.can_add_image() {
+						report_user_error(
+							window,
+							runtime,
+							"The scene has no room for another image.".to_string(),
+						);
+					} else {
+						runtime.modal_ui_open = true;
+						let result = unsafe { file_dialog::choose_image(window) };
+						runtime.modal_ui_open = false;
+						unsafe {
+							let _ = SetFocus(window);
+						}
+						match result {
+							Ok(Some(path)) => match image_file::load(&path) {
+								Ok(image) => {
+									match image_store::app_image_folder().and_then(|folder| {
+										image_store::import_image_into(&folder, &path)
+									}) {
+										Ok(stored_file_name) => {
+											if let Err(error) = runtime
+												.application
+												.add_image(image, stored_file_name)
+											{
+												report_user_error(
+													window,
+													runtime,
+													error.to_string(),
+												);
+											}
+										}
+										Err(error) => report_user_error(
+											window,
+											runtime,
+											format!("Could not store selected image: {error}"),
+										),
+									}
 								}
 								Err(error) => report_user_error(
 									window,
 									runtime,
-									format!("Could not store selected image: {error}"),
+									format!("Could not load selected image: {error}"),
 								),
 							},
+							Ok(None) => {}
 							Err(error) => report_user_error(
 								window,
 								runtime,
-								format!("Could not load selected image: {error}"),
+								format!("Could not open the image picker: {error}"),
 							),
-						},
-						Ok(None) => {}
-						Err(error) => report_user_error(
-							window,
-							runtime,
-							format!("Could not open the image picker: {error}"),
-						),
+						}
 					}
 					refresh_panel_values(runtime);
 				}
@@ -366,12 +385,11 @@ unsafe extern "system" fn window_procedure(
 			}
 			handle_panel_actions(window, runtime);
 			let (x, y) = mouse_position(lparam);
-			if let Some((flip_x, flip_y)) = runtime.application.select_image_for_context_menu(x, y)
-			{
+			if let Some(menu_state) = runtime.application.select_image_for_context_menu(x, y) {
 				refresh_panel_values(runtime);
 				redraw_or_log(window, runtime);
 				runtime.modal_ui_open = true;
-				let result = context_menu::show(window, x, y, flip_x, flip_y);
+				let result = context_menu::show(window, x, y, menu_state);
 				runtime.modal_ui_open = false;
 				match result {
 					Ok(action) => handle_context_menu_action(window, runtime, action),
@@ -427,18 +445,27 @@ fn handle_panel_actions(window: HWND, runtime: &mut Runtime) {
 	for action in actions {
 		match action {
 			PanelAction::SetX(x) => {
-				if let Some((_, y, _)) = runtime.application.selected_panel_values() {
-					image_changed |= runtime.application.set_selected_center(x, y);
+				if let Some(values) = runtime.application.selected_panel_values() {
+					image_changed |= runtime.application.set_selected_center(x, values.y);
 				}
 			}
 			PanelAction::SetY(y) => {
-				if let Some((x, _, _)) = runtime.application.selected_panel_values() {
-					image_changed |= runtime.application.set_selected_center(x, y);
+				if let Some(values) = runtime.application.selected_panel_values() {
+					image_changed |= runtime.application.set_selected_center(values.x, y);
 				}
 			}
 			PanelAction::SetOpacity(opacity) => {
 				image_changed |= runtime.application.set_selected_opacity(opacity);
 			}
+			PanelAction::SetZ(z) => match runtime.application.set_selected_z(z) {
+				Ok(changed) => image_changed |= changed,
+				Err(error) => report_user_error(window, runtime, error.to_string()),
+			},
+			PanelAction::RejectedZ => report_user_error(
+				window,
+				runtime,
+				"Z must be an integer from 0 to 65535.".to_string(),
+			),
 			PanelAction::Hidden => unsafe {
 				let _ = SetFocus(window);
 			},
@@ -552,7 +579,13 @@ fn load_selected_preset(window: HWND, runtime: &mut Runtime) {
 		}
 	};
 	let (entries, mut problems) =
-		preset.into_placements(runtime.screen.width as u32, runtime.screen.height as u32);
+		match preset.into_placements(runtime.screen.width as u32, runtime.screen.height as u32) {
+			Ok(result) => result,
+			Err(error) => {
+				report_user_error(window, runtime, error);
+				return;
+			}
+		};
 	let folder = match image_store::app_image_folder() {
 		Ok(folder) => folder,
 		Err(error) => {
@@ -566,7 +599,10 @@ fn load_selected_preset(window: HWND, runtime: &mut Runtime) {
 	};
 	let (images, image_problems) = image_store::load_embedded_images(&folder, entries);
 	problems.extend(image_problems);
-	runtime.application.replace_images(images);
+	if let Err(error) = runtime.application.replace_images(images) {
+		report_user_error(window, runtime, error.to_string());
+		return;
+	}
 	runtime.application.mark_preset_saved(&path);
 	refresh_panel_values(runtime);
 	redraw_or_log(window, runtime);

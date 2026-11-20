@@ -52,6 +52,15 @@ pub(crate) struct ImagePlacement {
 	pub(crate) flip_y: bool,
 	#[serde(default = "default_opacity_percent")]
 	pub(crate) opacity_percent: u8,
+	pub(crate) z_order: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PanelValues {
+	pub x: i32,
+	pub y: i32,
+	pub opacity: u8,
+	pub z: u16,
 }
 
 fn default_opacity_percent() -> u8 {

@@ -5,6 +5,7 @@ use crate::{
 	geometry,
 	image_file::ImageData,
 	model::{DirtyRect, ImageObject, Mode},
+	z_order::image_back_to_front_indices,
 };
 
 mod editor_chrome;
@@ -192,8 +193,10 @@ pub(crate) fn render_region(
 		canvas.draw_dot_pattern(cursor_position);
 	}
 
-	for object in images {
-		canvas.draw_image(object);
+	for image_index in image_back_to_front_indices(images) {
+		if let Some(object) = images.get(image_index) {
+			canvas.draw_image(object);
+		}
 	}
 
 	if mode == Mode::Editing {

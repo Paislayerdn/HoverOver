@@ -412,6 +412,7 @@ mod tests {
 				flip_x: false,
 				flip_y: false,
 				opacity_percent: 100,
+				z_order: 0,
 			},
 			image_bytes: encoded_png.clone(),
 		};
@@ -456,6 +457,7 @@ mod tests {
 				flip_x: false,
 				flip_y: false,
 				opacity_percent: 100,
+				z_order: 0,
 			},
 			image_bytes: vec![1, 2, 3],
 		};

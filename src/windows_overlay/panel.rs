@@ -25,20 +25,25 @@ use windows::{
 	core::{Error, HSTRING, PCWSTR, Result, w},
 };
 
+use crate::model::PanelValues;
+
 pub(super) const PANEL_ACTION_MESSAGE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 3;
 
 const PANEL_CLASS: PCWSTR = w!("HoverOverToolPanel");
 const ID_X_EDIT: usize = 101;
 const ID_Y_EDIT: usize = 102;
 const ID_OPACITY_EDIT: usize = 103;
+const ID_Z_EDIT: usize = 104;
 const PANEL_WIDTH: i32 = 280;
-const PANEL_HEIGHT: i32 = 190;
+const PANEL_HEIGHT: i32 = 230;
 
 #[derive(Clone, Copy)]
 pub(super) enum PanelAction {
 	SetX(i32),
 	SetY(i32),
 	SetOpacity(i32),
+	SetZ(u16),
+	RejectedZ,
 	Hidden,
 }
 
@@ -53,8 +58,9 @@ struct PanelState {
 	x_edit: HWND,
 	y_edit: HWND,
 	opacity_edit: HWND,
+	z_edit: HWND,
 	suppress_changes: bool,
-	changed_edits: [bool; 3],
+	changed_edits: [bool; 4],
 	actions: VecDeque<PanelAction>,
 }
 
@@ -72,8 +78,9 @@ impl Panel {
 			x_edit: HWND::default(),
 			y_edit: HWND::default(),
 			opacity_edit: HWND::default(),
+			z_edit: HWND::default(),
 			suppress_changes: true,
-			changed_edits: [false; 3],
+			changed_edits: [false; 4],
 			actions: VecDeque::new(),
 		});
 		let window = unsafe {
@@ -96,7 +103,7 @@ impl Panel {
 		Ok(Self { window, state })
 	}
 
-	pub(super) fn show_values(&mut self, values: Option<(i32, i32, u8)>) {
+	pub(super) fn show_values(&mut self, values: Option<PanelValues>) {
 		self.set_values(values);
 		unsafe {
 			let _ = ShowWindow(self.window, SW_SHOW);
@@ -118,25 +125,29 @@ impl Panel {
 		}
 	}
 
-	pub(super) fn set_values(&mut self, values: Option<(i32, i32, u8)>) {
+	pub(super) fn set_values(&mut self, values: Option<PanelValues>) {
 		self.state.suppress_changes = true;
 		match values {
-			Some((x, y, opacity)) => {
-				set_edit_value_if_not_focused(self.state.x_edit, &x.to_string());
-				set_edit_value_if_not_focused(self.state.y_edit, &y.to_string());
-				set_edit_value_if_not_focused(self.state.opacity_edit, &opacity.to_string());
+			Some(values) => {
+				set_edit_value_if_not_focused(self.state.x_edit, &values.x.to_string());
+				set_edit_value_if_not_focused(self.state.y_edit, &values.y.to_string());
+				set_edit_value_if_not_focused(self.state.opacity_edit, &values.opacity.to_string());
+				set_edit_value_if_not_focused(self.state.z_edit, &values.z.to_string());
 				set_edit_enabled(self.state.x_edit, true);
 				set_edit_enabled(self.state.y_edit, true);
 				set_edit_enabled(self.state.opacity_edit, true);
+				set_edit_enabled(self.state.z_edit, true);
 			}
 			None => {
-				self.state.changed_edits = [false; 3];
+				self.state.changed_edits = [false; 4];
 				set_edit_value(self.state.x_edit, "");
 				set_edit_value(self.state.y_edit, "");
 				set_edit_value(self.state.opacity_edit, "");
+				set_edit_value(self.state.z_edit, "");
 				set_edit_enabled(self.state.x_edit, false);
 				set_edit_enabled(self.state.y_edit, false);
 				set_edit_enabled(self.state.opacity_edit, false);
+				set_edit_enabled(self.state.z_edit, false);
 			}
 		}
 		self.state.suppress_changes = false;
@@ -154,7 +165,7 @@ impl Panel {
 
 	pub(super) fn show_and_focus(
 		&mut self,
-		values: Option<(i32, i32, u8)>,
+		values: Option<PanelValues>,
 		field: FocusField,
 		screen: (i32, i32, i32, i32),
 	) {
@@ -263,7 +274,9 @@ fn create_controls(window: HWND, state: &mut PanelState) -> Result<()> {
 	state.y_edit = create_edit(window, state.instance, "", 100, 58, ID_Y_EDIT)?;
 	create_label(window, state.instance, "Opacity", 16, 104)?;
 	state.opacity_edit = create_edit(window, state.instance, "", 100, 100, ID_OPACITY_EDIT)?;
-	for edit in [state.x_edit, state.y_edit, state.opacity_edit] {
+	create_label(window, state.instance, "Z", 16, 146)?;
+	state.z_edit = create_edit(window, state.instance, "", 100, 142, ID_Z_EDIT)?;
+	for edit in [state.x_edit, state.y_edit, state.opacity_edit, state.z_edit] {
 		unsafe {
 			let _ = EnableWindow(edit, false);
 		}
@@ -341,6 +354,10 @@ fn commit_edit(state: &mut PanelState, control_id: usize) {
 		ID_OPACITY_EDIT => {
 			parse_opacity_text(&read_edit_text(state.opacity_edit)).map(PanelAction::SetOpacity)
 		}
+		ID_Z_EDIT => match parse_z_text(&read_edit_text(state.z_edit)) {
+			Some(value) => Some(PanelAction::SetZ(value)),
+			None => Some(PanelAction::RejectedZ),
+		},
 		_ => None,
 	};
 	if let Some(action) = action {
@@ -350,18 +367,22 @@ fn commit_edit(state: &mut PanelState, control_id: usize) {
 }
 
 fn edit_is_changed(state: &PanelState, control_id: usize) -> bool {
-	state.changed_edits[edit_index(control_id)]
+	edit_index(control_id).is_some_and(|index| state.changed_edits[index])
 }
 
 fn set_edit_changed(state: &mut PanelState, control_id: usize, changed: bool) {
-	state.changed_edits[edit_index(control_id)] = changed;
+	if let Some(index) = edit_index(control_id) {
+		state.changed_edits[index] = changed;
+	}
 }
 
-fn edit_index(control_id: usize) -> usize {
+fn edit_index(control_id: usize) -> Option<usize> {
 	match control_id {
-		ID_X_EDIT => 0,
-		ID_Y_EDIT => 1,
-		_ => 2,
+		ID_X_EDIT => Some(0),
+		ID_Y_EDIT => Some(1),
+		ID_OPACITY_EDIT => Some(2),
+		ID_Z_EDIT => Some(3),
+		_ => None,
 	}
 }
 
@@ -472,9 +493,13 @@ fn parse_opacity_text(text: &str) -> Option<i32> {
 	parse_integer_text(text)
 }
 
+fn parse_z_text(text: &str) -> Option<u16> {
+	text.trim().parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
-	use super::{parse_integer_text, parse_opacity_text};
+	use super::{parse_integer_text, parse_opacity_text, parse_z_text};
 	use crate::model::clamp_opacity_percent;
 
 	#[test]
@@ -502,5 +527,14 @@ mod tests {
 			Some(100)
 		);
 		assert_eq!(parse_opacity_text("bad"), None);
+	}
+
+	#[test]
+	fn z_text_parser_accepts_u16_values_and_rejects_invalid_values() {
+		assert_eq!(parse_z_text("0"), Some(0));
+		assert_eq!(parse_z_text(" 65535 "), Some(65535));
+		for invalid in ["-1", "65536", "", "garbage"] {
+			assert_eq!(parse_z_text(invalid), None);
+		}
 	}
 }

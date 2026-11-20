@@ -15,6 +15,7 @@ mod presets;
 mod renderer;
 mod snapping;
 mod windows_overlay;
+mod z_order;
 
 fn main() {
 	if let Err(error) = windows_overlay::run() {
