@@ -3,6 +3,7 @@ use std::path::Path;
 fn main() {
 	// Re-run resource setup whenever the optional application icon changes.
 	println!("cargo:rerun-if-changed=assets/icon.ico");
+	println!("cargo:rerun-if-changed=assets/HoverOver.manifest");
 
 	// The Windows resource compiler is only used for Windows executables.
 	#[cfg(windows)]
@@ -21,6 +22,9 @@ fn compile_windows_resources() {
 	// Set the names displayed in Windows file properties and Task Manager.
 	resources.set("FileDescription", "Hover Over");
 	resources.set("ProductName", "Hover Over");
+	resources.set("FileVersion", "1.0.0");
+	resources.set("ProductVersion", "1.0.0");
+	resources.set_manifest_file("assets/HoverOver.manifest");
 	// Compile the Windows version information and icon into the executable.
 	resources.compile().expect("Windows resources failed to compile; check that the Windows SDK resource compiler rc.exe is installed");
 }

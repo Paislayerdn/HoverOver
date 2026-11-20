@@ -34,8 +34,9 @@ const ID_X_EDIT: usize = 101;
 const ID_Y_EDIT: usize = 102;
 const ID_OPACITY_EDIT: usize = 103;
 const ID_Z_EDIT: usize = 104;
+const ID_ROTATION_EDIT: usize = 105;
 const PANEL_WIDTH: i32 = 280;
-const PANEL_HEIGHT: i32 = 230;
+const PANEL_HEIGHT: i32 = 272;
 
 #[derive(Clone, Copy)]
 pub(super) enum PanelAction {
@@ -43,6 +44,7 @@ pub(super) enum PanelAction {
 	SetY(i32),
 	SetOpacity(i32),
 	SetZ(u16),
+	SetRotation(f32),
 	RejectedZ,
 	Hidden,
 }
@@ -59,8 +61,9 @@ struct PanelState {
 	y_edit: HWND,
 	opacity_edit: HWND,
 	z_edit: HWND,
+	rotation_edit: HWND,
 	suppress_changes: bool,
-	changed_edits: [bool; 4],
+	changed_edits: [bool; 5],
 	actions: VecDeque<PanelAction>,
 }
 
@@ -79,8 +82,9 @@ impl Panel {
 			y_edit: HWND::default(),
 			opacity_edit: HWND::default(),
 			z_edit: HWND::default(),
+			rotation_edit: HWND::default(),
 			suppress_changes: true,
-			changed_edits: [false; 4],
+			changed_edits: [false; 5],
 			actions: VecDeque::new(),
 		});
 		let window = unsafe {
@@ -133,21 +137,28 @@ impl Panel {
 				set_edit_value_if_not_focused(self.state.y_edit, &values.y.to_string());
 				set_edit_value_if_not_focused(self.state.opacity_edit, &values.opacity.to_string());
 				set_edit_value_if_not_focused(self.state.z_edit, &values.z.to_string());
+				set_edit_value_if_not_focused(
+					self.state.rotation_edit,
+					&values.rotation_degrees.to_string(),
+				);
 				set_edit_enabled(self.state.x_edit, true);
 				set_edit_enabled(self.state.y_edit, true);
 				set_edit_enabled(self.state.opacity_edit, true);
 				set_edit_enabled(self.state.z_edit, true);
+				set_edit_enabled(self.state.rotation_edit, true);
 			}
 			None => {
-				self.state.changed_edits = [false; 4];
+				self.state.changed_edits = [false; 5];
 				set_edit_value(self.state.x_edit, "");
 				set_edit_value(self.state.y_edit, "");
 				set_edit_value(self.state.opacity_edit, "");
 				set_edit_value(self.state.z_edit, "");
+				set_edit_value(self.state.rotation_edit, "");
 				set_edit_enabled(self.state.x_edit, false);
 				set_edit_enabled(self.state.y_edit, false);
 				set_edit_enabled(self.state.opacity_edit, false);
 				set_edit_enabled(self.state.z_edit, false);
+				set_edit_enabled(self.state.rotation_edit, false);
 			}
 		}
 		self.state.suppress_changes = false;
@@ -274,9 +285,17 @@ fn create_controls(window: HWND, state: &mut PanelState) -> Result<()> {
 	state.y_edit = create_edit(window, state.instance, "", 100, 58, ID_Y_EDIT)?;
 	create_label(window, state.instance, "Opacity", 16, 104)?;
 	state.opacity_edit = create_edit(window, state.instance, "", 100, 100, ID_OPACITY_EDIT)?;
-	create_label(window, state.instance, "Z", 16, 146)?;
-	state.z_edit = create_edit(window, state.instance, "", 100, 142, ID_Z_EDIT)?;
-	for edit in [state.x_edit, state.y_edit, state.opacity_edit, state.z_edit] {
+	create_label(window, state.instance, "Rotation", 16, 146)?;
+	state.rotation_edit = create_edit(window, state.instance, "", 100, 142, ID_ROTATION_EDIT)?;
+	create_label(window, state.instance, "Z", 16, 188)?;
+	state.z_edit = create_edit(window, state.instance, "", 100, 184, ID_Z_EDIT)?;
+	for edit in [
+		state.x_edit,
+		state.y_edit,
+		state.opacity_edit,
+		state.z_edit,
+		state.rotation_edit,
+	] {
 		unsafe {
 			let _ = EnableWindow(edit, false);
 		}
@@ -358,6 +377,9 @@ fn commit_edit(state: &mut PanelState, control_id: usize) {
 			Some(value) => Some(PanelAction::SetZ(value)),
 			None => Some(PanelAction::RejectedZ),
 		},
+		ID_ROTATION_EDIT => {
+			parse_rotation_text(&read_edit_text(state.rotation_edit)).map(PanelAction::SetRotation)
+		}
 		_ => None,
 	};
 	if let Some(action) = action {
@@ -382,6 +404,7 @@ fn edit_index(control_id: usize) -> Option<usize> {
 		ID_Y_EDIT => Some(1),
 		ID_OPACITY_EDIT => Some(2),
 		ID_Z_EDIT => Some(3),
+		ID_ROTATION_EDIT => Some(4),
 		_ => None,
 	}
 }
@@ -497,9 +520,15 @@ fn parse_z_text(text: &str) -> Option<u16> {
 	text.trim().parse().ok()
 }
 
+fn parse_rotation_text(text: &str) -> Option<f32> {
+	let rotation_degrees = text.trim().parse::<f32>().ok()?;
+	(rotation_degrees.is_finite() && (0.0..360.0).contains(&rotation_degrees))
+		.then_some(rotation_degrees)
+}
+
 #[cfg(test)]
 mod tests {
-	use super::{parse_integer_text, parse_opacity_text, parse_z_text};
+	use super::{parse_integer_text, parse_opacity_text, parse_rotation_text, parse_z_text};
 	use crate::model::clamp_opacity_percent;
 
 	#[test]
@@ -535,6 +564,16 @@ mod tests {
 		assert_eq!(parse_z_text(" 65535 "), Some(65535));
 		for invalid in ["-1", "65536", "", "garbage"] {
 			assert_eq!(parse_z_text(invalid), None);
+		}
+	}
+
+	#[test]
+	fn rotation_text_accepts_floats_from_zero_up_to_but_not_including_360() {
+		assert_eq!(parse_rotation_text("0"), Some(0.0));
+		assert_eq!(parse_rotation_text(" 45.25 "), Some(45.25));
+		assert_eq!(parse_rotation_text("359.999"), Some(359.999));
+		for invalid in ["-0.1", "360", "360.0", "", "garbage", "NaN", "inf"] {
+			assert_eq!(parse_rotation_text(invalid), None);
 		}
 	}
 }

@@ -1,5 +1,6 @@
 //! Copies added images into HoverOver's private images folder.
 
+use std::os::windows::fs::MetadataExt;
 use std::{
 	error::Error,
 	fs, io,
@@ -59,14 +60,18 @@ impl Error for ImageStoreError {
 
 /// Finds and creates `%APPDATA%/HoverOver/images` for the running user.
 pub fn app_image_folder() -> Result<PathBuf, ImageStoreError> {
-	let app_data = std::env::var_os("APPDATA").ok_or(ImageStoreError::MissingAppData)?;
-	let folder = PathBuf::from(app_data).join("HoverOver").join("images");
+	let folder = app_image_folder_path()?;
 	fs::create_dir_all(&folder).map_err(|source| ImageStoreError::Io {
 		operation: "create the image folder",
 		path: folder.clone(),
 		source,
 	})?;
 	Ok(folder)
+}
+
+pub(crate) fn app_image_folder_path() -> Result<PathBuf, ImageStoreError> {
+	let app_data = std::env::var_os("APPDATA").ok_or(ImageStoreError::MissingAppData)?;
+	Ok(PathBuf::from(app_data).join("HoverOver").join("images"))
 }
 
 /// Copies a selected image and returns its plain stored file name.
@@ -135,11 +140,21 @@ pub fn import_image_into(folder: &Path, source_path: &Path) -> Result<String, Im
 	Ok(stored_file_name)
 }
 
+#[cfg(test)]
 pub(crate) fn import_image_bytes_into(
 	folder: &Path,
 	preferred_file_name: &str,
 	bytes: &[u8],
 ) -> Result<String, ImageStoreError> {
+	import_image_bytes_into_tracked(folder, preferred_file_name, bytes)
+		.map(|(file_name, _)| file_name)
+}
+
+fn import_image_bytes_into_tracked(
+	folder: &Path,
+	preferred_file_name: &str,
+	bytes: &[u8],
+) -> Result<(String, bool), ImageStoreError> {
 	fs::create_dir_all(folder).map_err(|source| ImageStoreError::Io {
 		operation: "create the image folder",
 		path: folder.to_path_buf(),
@@ -157,7 +172,7 @@ pub(crate) fn import_image_bytes_into(
 		};
 		let destination = folder.join(&file_name);
 		match fs::read(&destination) {
-			Ok(existing_bytes) if existing_bytes == bytes => return Ok(file_name),
+			Ok(existing_bytes) if existing_bytes == bytes => return Ok((file_name, false)),
 			Ok(_) => candidate_names.push(file_name),
 			Err(error) if error.kind() == io::ErrorKind::NotFound => {
 				candidate_names.push(file_name)
@@ -179,18 +194,26 @@ pub(crate) fn import_image_bytes_into(
 				path: destination,
 				source,
 			})?;
-			return Ok(file_name);
+			return Ok((file_name, true));
 		}
 	}
 	Err(ImageStoreError::TooManyNameCollisions)
 }
 
+#[derive(Default)]
+pub(crate) struct EmbeddedImageLoad {
+	pub images: Vec<ImageObject>,
+	pub problems: Vec<String>,
+	pub newly_imported_files: Vec<PathBuf>,
+}
+
 pub(crate) fn load_embedded_images(
 	folder: &Path,
 	entries: Vec<EmbeddedPresetImage>,
-) -> (Vec<ImageObject>, Vec<String>) {
+) -> EmbeddedImageLoad {
 	let mut images = Vec::new();
 	let mut problems = Vec::new();
+	let mut newly_imported_files = Vec::new();
 	for (index, mut entry) in entries.into_iter().enumerate() {
 		let image = match image_file::load_from_bytes(&entry.image_bytes) {
 			Ok(image) if image.width <= 16_384 && image.height <= 16_384 => image,
@@ -209,12 +232,17 @@ pub(crate) fn load_embedded_images(
 				continue;
 			}
 		};
-		match import_image_bytes_into(
+		match import_image_bytes_into_tracked(
 			folder,
 			&entry.placement.stored_file_name,
 			&entry.image_bytes,
 		) {
-			Ok(file_name) => entry.placement.stored_file_name = file_name,
+			Ok((file_name, was_newly_imported)) => {
+				if was_newly_imported {
+					newly_imported_files.push(folder.join(&file_name));
+				}
+				entry.placement.stored_file_name = file_name;
+			}
 			Err(error) => {
 				problems.push(format!(
 					"Image {} could not be copied into the local image folder: {error}",
@@ -228,7 +256,44 @@ pub(crate) fn load_embedded_images(
 			image,
 		});
 	}
-	(images, problems)
+	EmbeddedImageLoad {
+		images,
+		problems,
+		newly_imported_files,
+	}
+}
+
+pub(crate) fn cleanup_imported_files(folder: &Path, paths: &[PathBuf]) -> Vec<String> {
+	let mut problems = Vec::new();
+	for path in paths {
+		if path.parent() != Some(folder) {
+			problems.push(format!(
+				"Could not clean up an imported image outside '{}'.",
+				folder.display()
+			));
+			continue;
+		}
+		match fs::symlink_metadata(path) {
+			Ok(metadata) if metadata.file_attributes() & 0x0000_0400 == 0 && metadata.is_file() => {
+				if let Err(error) = fs::remove_file(path) {
+					problems.push(format!(
+						"Could not remove unused imported image '{}': {error}",
+						path.display()
+					));
+				}
+			}
+			Ok(_) => problems.push(format!(
+				"Could not safely remove unused imported image '{}'.",
+				path.display()
+			)),
+			Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+			Err(error) => problems.push(format!(
+				"Could not inspect unused imported image '{}': {error}",
+				path.display()
+			)),
+		}
+	}
+	problems
 }
 
 fn sanitized_file_parts(file_name: &str) -> Result<(String, Option<String>), ImageStoreError> {
@@ -416,20 +481,31 @@ mod tests {
 			},
 			image_bytes: encoded_png.clone(),
 		};
-		let (first_load, first_problems) = load_embedded_images(&images_folder, vec![make_entry()]);
-		assert!(first_problems.is_empty());
-		assert_eq!(first_load.len(), 1);
-		assert_eq!(first_load[0].image.width, 1);
-		let (second_load, second_problems) =
-			load_embedded_images(&images_folder, vec![make_entry()]);
-		assert!(second_problems.is_empty());
-		assert_eq!(second_load.len(), 1);
+		let first_load = load_embedded_images(&images_folder, vec![make_entry()]);
+		assert!(first_load.problems.is_empty());
+		assert_eq!(first_load.images.len(), 1);
+		assert_eq!(first_load.images[0].image.width, 1);
+		assert_eq!(first_load.newly_imported_files.len(), 1);
+		let second_load = load_embedded_images(&images_folder, vec![make_entry()]);
+		assert!(second_load.problems.is_empty());
+		assert_eq!(second_load.images.len(), 1);
+		assert!(second_load.newly_imported_files.is_empty());
 		let directory_entries = fs::read_dir(&images_folder);
 		assert_eq!(
 			directory_entries
 				.map(|entries| entries.count())
 				.unwrap_or(0),
 			1
+		);
+		assert!(
+			super::cleanup_imported_files(&images_folder, &first_load.newly_imported_files)
+				.is_empty()
+		);
+		assert_eq!(
+			fs::read_dir(&images_folder)
+				.map(|entries| entries.count())
+				.unwrap_or(0),
+			0
 		);
 	}
 
@@ -461,8 +537,8 @@ mod tests {
 			},
 			image_bytes: vec![1, 2, 3],
 		};
-		let (images, problems) = load_embedded_images(temporary_folder.path(), vec![entry]);
-		assert!(images.is_empty());
-		assert_eq!(problems.len(), 1);
+		let load_result = load_embedded_images(temporary_folder.path(), vec![entry]);
+		assert!(load_result.images.is_empty());
+		assert_eq!(load_result.problems.len(), 1);
 	}
 }

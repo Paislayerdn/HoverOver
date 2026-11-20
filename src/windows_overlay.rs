@@ -18,8 +18,8 @@ use windows::{
 			CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
 			DispatchMessageW, GWL_EXSTYLE, GWLP_USERDATA, GetCursorPos, GetMessageW,
 			GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDYES, LoadCursorW,
-			MB_DEFBUTTON2, MB_ICONERROR, MB_ICONQUESTION, MB_OK, MB_YESNO, MSG, MessageBoxW,
-			PostQuitMessage, RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+			MB_DEFBUTTON2, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MSG,
+			MessageBoxW, PostQuitMessage, RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
 			SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW, SWP_FRAMECHANGED, SWP_NOMOVE,
 			SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
 			TranslateMessage, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN,
@@ -39,6 +39,7 @@ use crate::{
 
 mod keyboard;
 use keyboard::ToggleHotkey;
+mod local_data;
 mod surface;
 use surface::DibSurface;
 mod context_menu;
@@ -243,6 +244,9 @@ unsafe extern "system" fn window_procedure(
 					match menu_result {
 						Ok(PresetsMenuAction::Save) => save_current_preset(window, runtime),
 						Ok(PresetsMenuAction::Load) => load_selected_preset(window, runtime),
+						Ok(PresetsMenuAction::ClearLocalData) => {
+							clear_all_local_data(window, runtime)
+						}
 						Ok(PresetsMenuAction::Cancel) => {}
 						Err(error) => report_user_error(
 							window,
@@ -461,6 +465,9 @@ fn handle_panel_actions(window: HWND, runtime: &mut Runtime) {
 				Ok(changed) => image_changed |= changed,
 				Err(error) => report_user_error(window, runtime, error.to_string()),
 			},
+			PanelAction::SetRotation(rotation_degrees) => {
+				image_changed |= runtime.application.set_selected_rotation(rotation_degrees);
+			}
 			PanelAction::RejectedZ => report_user_error(
 				window,
 				runtime,
@@ -501,36 +508,15 @@ fn save_current_preset(window: HWND, runtime: &mut Runtime) {
 			return;
 		}
 	};
-	let folder = match image_store::app_image_folder() {
-		Ok(folder) => folder,
-		Err(error) => {
-			report_user_error(
-				window,
-				runtime,
-				format!("Could not find the image folder: {error}"),
-			);
-			return;
-		}
-	};
 	let placements = runtime.application.current_placements();
 	let mut preset = crate::presets::PresetFile::from_placements(
 		&placements,
 		runtime.screen.width as u32,
 		runtime.screen.height as u32,
 	);
-	for image in &mut preset.images {
-		let image_path = folder.join(&image.stored_file_name);
-		match std::fs::read(&image_path) {
-			Ok(bytes) => image.image_data_base64 = STANDARD.encode(bytes),
-			Err(error) => {
-				report_user_error(
-					window,
-					runtime,
-					format!("Could not read image '{}': {error}", image_path.display()),
-				);
-				return;
-			}
-		}
+	if let Err(error) = embed_current_images(&runtime.application, &mut preset) {
+		report_user_error(window, runtime, error);
+		return;
 	}
 	if let Err(error) = crate::presets::save_preset_file(&path, &preset) {
 		report_user_error(
@@ -541,6 +527,25 @@ fn save_current_preset(window: HWND, runtime: &mut Runtime) {
 		return;
 	}
 	runtime.application.mark_preset_saved(&path);
+}
+
+fn embed_current_images(
+	application: &Application,
+	preset: &mut crate::presets::PresetFile,
+) -> Result<(), String> {
+	for (image_index, image) in preset.images.iter_mut().enumerate() {
+		let encoded_image = application
+			.image_png_bytes(image_index)
+			.ok_or_else(|| format!("Could not find in-memory image {}.", image_index + 1))?
+			.map_err(|error| {
+				format!(
+					"Could not encode in-memory image {} for the preset: {error}",
+					image_index + 1
+				)
+			})?;
+		image.image_data_base64 = STANDARD.encode(encoded_image);
+	}
+	Ok(())
 }
 
 fn load_selected_preset(window: HWND, runtime: &mut Runtime) {
@@ -578,6 +583,7 @@ fn load_selected_preset(window: HWND, runtime: &mut Runtime) {
 			return;
 		}
 	};
+	let preset_had_images = !preset.images.is_empty();
 	let (entries, mut problems) =
 		match preset.into_placements(runtime.screen.width as u32, runtime.screen.height as u32) {
 			Ok(result) => result,
@@ -586,20 +592,58 @@ fn load_selected_preset(window: HWND, runtime: &mut Runtime) {
 				return;
 			}
 		};
-	let folder = match image_store::app_image_folder() {
-		Ok(folder) => folder,
-		Err(error) => {
+	let mut image_folder = None;
+	let image_load = if entries.is_empty() {
+		image_store::EmbeddedImageLoad::default()
+	} else {
+		let folder = match image_store::app_image_folder_path() {
+			Ok(folder) => folder,
+			Err(error) => {
+				report_user_error(
+					window,
+					runtime,
+					format!("Could not find the image folder: {error}"),
+				);
+				return;
+			}
+		};
+		image_folder = Some(folder.clone());
+		image_store::load_embedded_images(&folder, entries)
+	};
+	problems.extend(image_load.problems);
+	if preset_had_images && image_load.images.is_empty() {
+		if let Some(folder) = image_folder.as_deref() {
+			problems.extend(image_store::cleanup_imported_files(
+				folder,
+				&image_load.newly_imported_files,
+			));
+		}
+		if problems.is_empty() {
+			problems.push("No images from this preset could be loaded.".to_string());
+		}
+		let message = format!(
+			"No images from this preset could be loaded. Your current scene was kept.\n\n{}",
+			problems.join("\n")
+		);
+		show_message_box(window, runtime, &message, MB_OK | MB_ICONERROR);
+		return;
+	}
+	if let Err(error) = runtime.application.replace_images(image_load.images) {
+		if let Some(folder) = image_folder.as_deref() {
+			let cleanup_problems =
+				image_store::cleanup_imported_files(folder, &image_load.newly_imported_files);
+			let cleanup_details = if cleanup_problems.is_empty() {
+				String::new()
+			} else {
+				format!("\n\nCleanup details:\n{}", cleanup_problems.join("\n"))
+			};
 			report_user_error(
 				window,
 				runtime,
-				format!("Could not find the image folder: {error}"),
+				format!("Could not replace the scene: {error}{cleanup_details}"),
 			);
 			return;
 		}
-	};
-	let (images, image_problems) = image_store::load_embedded_images(&folder, entries);
-	problems.extend(image_problems);
-	if let Err(error) = runtime.application.replace_images(images) {
 		report_user_error(window, runtime, error.to_string());
 		return;
 	}
@@ -612,6 +656,57 @@ fn load_selected_preset(window: HWND, runtime: &mut Runtime) {
 			problems.join("\n")
 		);
 		show_message_box(window, runtime, &message, MB_OK | MB_ICONERROR);
+	}
+}
+
+fn clear_all_local_data(window: HWND, runtime: &mut Runtime) {
+	let inspection = match local_data::inspect_local_data() {
+		Ok(Some(inspection)) => inspection,
+		Ok(None) => {
+			show_message_box(
+				window,
+				runtime,
+				"No local HoverOver data folder exists.",
+				MB_OK | MB_ICONINFORMATION,
+			);
+			return;
+		}
+		Err(error) => {
+			report_user_error(
+				window,
+				runtime,
+				format!("Could not safely inspect local HoverOver data: {error}"),
+			);
+			return;
+		}
+	};
+	runtime.modal_ui_open = true;
+	let confirmation = local_data::confirm_clear_local_data(window, &inspection);
+	runtime.modal_ui_open = false;
+	let confirmed = match confirmation {
+		Ok(confirmed) => confirmed,
+		Err(error) => {
+			report_user_error(window, runtime, error);
+			return;
+		}
+	};
+	if !confirmed {
+		return;
+	}
+	match local_data::clear_local_data(&inspection) {
+		Ok(path) => show_message_box(
+			window,
+			runtime,
+			&format!("Local HoverOver data was deleted from:\n{}", path.display()),
+			MB_OK | MB_ICONINFORMATION,
+		),
+		Err(error) => report_user_error(
+			window,
+			runtime,
+			format!(
+				"Local data deletion did not complete. Some files may already have been removed.\n\n{error}"
+			),
+		),
 	}
 }
 
@@ -780,5 +875,235 @@ fn current_mouse_position(window: HWND, lparam: LPARAM) -> (f32, f32) {
 		(position.x as f32, position.y as f32)
 	} else {
 		mouse_position(lparam)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{
+		fs,
+		path::PathBuf,
+		sync::atomic::{AtomicUsize, Ordering},
+		time::{SystemTime, UNIX_EPOCH},
+	};
+
+	use base64::{Engine, engine::general_purpose::STANDARD};
+
+	use super::embed_current_images;
+	use crate::{
+		app::Application,
+		image_file::{ImageData, load_from_bytes},
+		presets::PresetFile,
+	};
+
+	static NEXT_TEST_FOLDER: AtomicUsize = AtomicUsize::new(0);
+
+	struct TemporaryFolder(PathBuf);
+
+	impl TemporaryFolder {
+		fn new() -> Self {
+			let unique = NEXT_TEST_FOLDER.fetch_add(1, Ordering::Relaxed);
+			let timestamp = SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.map_or(0, |value| value.as_nanos());
+			let path = std::env::temp_dir().join(format!(
+				"hoverover-preset-image-tests-{}-{timestamp}-{unique}",
+				std::process::id()
+			));
+			assert!(fs::create_dir_all(&path).is_ok());
+			Self(path)
+		}
+	}
+
+	impl Drop for TemporaryFolder {
+		fn drop(&mut self) {
+			let _ = fs::remove_dir_all(&self.0);
+		}
+	}
+
+	fn test_image(red: u8, green: u8, blue: u8) -> ImageData {
+		ImageData {
+			width: 1,
+			height: 1,
+			rgba_pixels: vec![red, green, blue, 255],
+		}
+	}
+
+	fn preset_from_application(application: &Application) -> PresetFile {
+		let placements = application.current_placements();
+		let mut preset = PresetFile::from_placements(&placements, 100, 100);
+		assert!(embed_current_images(application, &mut preset).is_ok());
+		preset
+	}
+
+	fn serialized_image_pixels(preset: &PresetFile, image_index: usize) -> Vec<u8> {
+		let json = serde_json::to_string(preset);
+		assert!(json.is_ok());
+		let Ok(json) = json else {
+			return Vec::new();
+		};
+		let serialized_preset: Result<PresetFile, _> = serde_json::from_str(&json);
+		assert!(serialized_preset.is_ok());
+		let Ok(serialized_preset) = serialized_preset else {
+			return Vec::new();
+		};
+		let Some(encoded_image) = serialized_preset.images.get(image_index) else {
+			return Vec::new();
+		};
+		let image_bytes = STANDARD.decode(&encoded_image.image_data_base64);
+		assert!(image_bytes.is_ok());
+		let Ok(image_bytes) = image_bytes else {
+			return Vec::new();
+		};
+		let image = load_from_bytes(&image_bytes);
+		assert!(image.is_ok());
+		image.map_or_else(|_| Vec::new(), |image| image.rgba_pixels)
+	}
+
+	#[test]
+	fn filename_reuse_after_local_data_clear_keeps_each_images_own_pixels_in_the_preset() {
+		let temporary = TemporaryFolder::new();
+		let image_folder = temporary.0.join("HoverOver").join("images");
+		let reused_image_path = image_folder.join("image.png");
+		let first_image_bytes = crate::image_file::encode_png(&test_image(255, 0, 0));
+		assert!(first_image_bytes.is_ok());
+		let first_source_path = temporary.0.join("image.png");
+		assert!(
+			fs::write(
+				&first_source_path,
+				first_image_bytes.as_deref().unwrap_or_default()
+			)
+			.is_ok()
+		);
+		let first_stored_name =
+			crate::image_store::import_image_into(&image_folder, &first_source_path);
+		assert!(first_stored_name.is_ok());
+		let Ok(first_stored_name) = first_stored_name else {
+			return;
+		};
+		assert_eq!(first_stored_name, "image.png");
+		let first_image = crate::image_file::load(&reused_image_path);
+		assert!(first_image.is_ok());
+		let Ok(first_image) = first_image else {
+			return;
+		};
+
+		let mut application = Application::new(100, 100);
+		assert!(
+			application
+				.add_image(first_image, first_stored_name)
+				.is_ok()
+		);
+
+		// Simulate clearing local data: remove backing files but keep the scene in memory.
+		assert!(fs::remove_dir_all(temporary.0.join("HoverOver")).is_ok());
+		let second_image_bytes = crate::image_file::encode_png(&test_image(0, 0, 255));
+		assert!(second_image_bytes.is_ok());
+		let second_source_path = temporary.0.join("replacement").join("image.png");
+		assert!(
+			second_source_path
+				.parent()
+				.is_some_and(|path| fs::create_dir_all(path).is_ok())
+		);
+		assert!(
+			fs::write(
+				&second_source_path,
+				second_image_bytes.as_deref().unwrap_or_default()
+			)
+			.is_ok()
+		);
+		let second_stored_name =
+			crate::image_store::import_image_into(&image_folder, &second_source_path);
+		assert!(second_stored_name.is_ok());
+		let Ok(second_stored_name) = second_stored_name else {
+			return;
+		};
+		assert_eq!(second_stored_name, "image.png");
+		let second_image = crate::image_file::load(&reused_image_path);
+		assert!(second_image.is_ok());
+		let Ok(second_image) = second_image else {
+			return;
+		};
+		assert!(
+			application
+				.add_image(second_image, second_stored_name)
+				.is_ok()
+		);
+
+		let placements_before_saving = application.current_placements();
+		let preset = preset_from_application(&application);
+		let preset_path = temporary.0.join("saved-preset.json");
+		assert!(crate::presets::save_preset_file(&preset_path, &preset).is_ok());
+		let saved_preset = crate::presets::load_preset_file(&preset_path);
+		assert!(saved_preset.is_ok());
+		let Ok(saved_preset) = saved_preset else {
+			return;
+		};
+		assert_eq!(
+			serialized_image_pixels(&saved_preset, 0),
+			vec![255, 0, 0, 255]
+		);
+		assert_eq!(
+			serialized_image_pixels(&saved_preset, 1),
+			vec![0, 0, 255, 255]
+		);
+		assert_eq!(application.current_placements(), placements_before_saving);
+		assert_eq!(
+			application
+				.image_png_bytes(0)
+				.and_then(Result::ok)
+				.and_then(|bytes| load_from_bytes(&bytes).ok())
+				.map(|image| image.rgba_pixels),
+			Some(vec![255, 0, 0, 255])
+		);
+		assert_eq!(
+			application
+				.image_png_bytes(1)
+				.and_then(Result::ok)
+				.and_then(|bytes| load_from_bytes(&bytes).ok())
+				.map(|image| image.rgba_pixels),
+			Some(vec![0, 0, 255, 255])
+		);
+	}
+
+	#[test]
+	fn preset_saving_still_embeds_images_with_valid_backing_files() {
+		let temporary = TemporaryFolder::new();
+		let image_folder = temporary.0.join("images");
+		let backing_file = image_folder.join("ordinary.png");
+		let backing_bytes = crate::image_file::encode_png(&test_image(20, 180, 40));
+		assert!(backing_bytes.is_ok());
+		let source_path = temporary.0.join("ordinary.png");
+		assert!(fs::write(&source_path, backing_bytes.as_deref().unwrap_or_default()).is_ok());
+		let stored_file_name = crate::image_store::import_image_into(&image_folder, &source_path);
+		assert!(stored_file_name.is_ok());
+		let Ok(stored_file_name) = stored_file_name else {
+			return;
+		};
+		let loaded_image = crate::image_file::load(&backing_file);
+		assert!(loaded_image.is_ok());
+		let Ok(loaded_image) = loaded_image else {
+			return;
+		};
+
+		let mut application = Application::new(100, 100);
+		assert!(
+			application
+				.add_image(loaded_image, stored_file_name)
+				.is_ok()
+		);
+		let preset = preset_from_application(&application);
+		let preset_path = temporary.0.join("ordinary-preset.json");
+		assert!(crate::presets::save_preset_file(&preset_path, &preset).is_ok());
+		let saved_preset = crate::presets::load_preset_file(&preset_path);
+		assert!(saved_preset.is_ok());
+		let Ok(saved_preset) = saved_preset else {
+			return;
+		};
+		assert_eq!(
+			serialized_image_pixels(&saved_preset, 0),
+			vec![20, 180, 40, 255]
+		);
+		assert!(backing_file.exists());
 	}
 }

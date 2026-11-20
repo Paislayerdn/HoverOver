@@ -167,6 +167,15 @@ impl Application {
 			.collect()
 	}
 
+	pub(crate) fn image_png_bytes(
+		&self,
+		image_index: usize,
+	) -> Option<Result<Vec<u8>, image::ImageError>> {
+		self.images
+			.get(image_index)
+			.map(|object| crate::image_file::encode_png(&object.image))
+	}
+
 	pub(crate) fn has_unsaved_changes(&self) -> bool {
 		self.preset_session
 			.has_unsaved_changes(&self.current_placements())
@@ -193,6 +202,7 @@ impl Application {
 			y,
 			opacity: object.placement.opacity_percent,
 			z: object.placement.z_order,
+			rotation_degrees: panel_rotation_from_degrees(object.placement.rotation_degrees),
 		})
 	}
 
@@ -202,6 +212,27 @@ impl Application {
 
 	pub fn set_selected_opacity(&mut self, value: i32) -> bool {
 		self.set_selected_opacity_percent(value)
+	}
+
+	pub(crate) fn set_selected_rotation(&mut self, rotation_degrees: f32) -> bool {
+		if !rotation_degrees.is_finite() || !(0.0..360.0).contains(&rotation_degrees) {
+			return false;
+		}
+		let Some(image_index) = self.selected_image else {
+			return false;
+		};
+		let Some(object) = self.images.get_mut(image_index) else {
+			return false;
+		};
+		if panel_rotation_from_degrees(object.placement.rotation_degrees) == rotation_degrees {
+			return false;
+		}
+
+		let old_bounds = renderer::object_visual_bounds(object);
+		object.placement.rotation_degrees = rotation_degrees;
+		let new_bounds = renderer::object_visual_bounds(object);
+		self.add_dirty_region(old_bounds.union(new_bounds));
+		true
 	}
 
 	pub fn end_drag(&mut self) {
@@ -641,6 +672,10 @@ fn panel_y_from_screen_y(screen_y: i32) -> i32 {
 	screen_y * PANEL_Y_DIRECTION
 }
 
+fn panel_rotation_from_degrees(rotation_degrees: f32) -> f32 {
+	rotation_degrees.rem_euclid(360.0)
+}
+
 fn screen_y_from_panel_y(panel_y: i32) -> i32 {
 	panel_y * PANEL_Y_DIRECTION
 }
@@ -777,7 +812,8 @@ mod tests {
 				x: 0,
 				y: 0,
 				opacity: 100,
-				z: 0
+				z: 0,
+				rotation_degrees: 0.0,
 			})
 		);
 		assert!(application.set_selected_position_offset(-25, 40));
@@ -787,7 +823,8 @@ mod tests {
 				x: -25,
 				y: 40,
 				opacity: 100,
-				z: 0
+				z: 0,
+				rotation_degrees: 0.0,
 			})
 		);
 		assert!(application.deselect_selected_image());
@@ -803,6 +840,46 @@ mod tests {
 				screen_y
 			);
 		}
+	}
+
+	#[test]
+	fn panel_rotation_is_normalized_and_property_changes_repaint_the_image_bounds() {
+		let mut application = Application::new(100, 100);
+		assert!(
+			application
+				.add_image(
+					ImageData {
+						width: 20,
+						height: 20,
+						rgba_pixels: vec![255; 20 * 20 * 4],
+					},
+					"rotated.png".to_string(),
+				)
+				.is_ok()
+		);
+		application.images[0].placement.rotation_degrees = -45.0;
+		assert_eq!(
+			application
+				.selected_panel_values()
+				.map(|values| values.rotation_degrees),
+			Some(315.0)
+		);
+		let _ = application.take_dirty_region();
+		assert!(application.set_selected_rotation(32.5));
+		assert!(application.take_dirty_region().is_some());
+		assert_eq!(
+			application
+				.selected_panel_values()
+				.map(|values| values.rotation_degrees),
+			Some(32.5)
+		);
+		assert!(!application.set_selected_rotation(360.0));
+		assert_eq!(
+			application
+				.selected_panel_values()
+				.map(|values| values.rotation_degrees),
+			Some(32.5)
+		);
 	}
 
 	#[test]

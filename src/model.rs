@@ -55,12 +55,13 @@ pub(crate) struct ImagePlacement {
 	pub(crate) z_order: u16,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PanelValues {
 	pub x: i32,
 	pub y: i32,
 	pub opacity: u8,
 	pub z: u16,
+	pub rotation_degrees: f32,
 }
 
 fn default_opacity_percent() -> u8 {

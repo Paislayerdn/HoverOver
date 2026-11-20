@@ -28,3 +28,16 @@ pub fn load_from_bytes(bytes: &[u8]) -> Result<ImageData, image::ImageError> {
 		rgba_pixels: image.into_raw(),
 	})
 }
+
+pub(crate) fn encode_png(image: &ImageData) -> Result<Vec<u8>, image::ImageError> {
+	let mut encoded_bytes = Vec::new();
+	let encoder = image::codecs::png::PngEncoder::new(&mut encoded_bytes);
+	image::ImageEncoder::write_image(
+		encoder,
+		&image.rgba_pixels,
+		image.width,
+		image.height,
+		image::ExtendedColorType::Rgba8,
+	)?;
+	Ok(encoded_bytes)
+}
